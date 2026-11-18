@@ -1,0 +1,338 @@
+
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Supervisório ECA</title>
+
+    <link rel="stylesheet" href="css/style.css">
+</head>
+
+<body>
+
+    <div id="application">
+
+        <!-- CABECALHO -->
+        <header class="main-header">
+
+            <div class="brand">
+                <div class="brand-icon">ECA</div>
+
+                <div class="brand-text">
+                    <h1>SUPERVISÓRIO ECA</h1>
+                    <span>Sistema de monitoramento de processo</span>
+                </div>
+            </div>
+
+            <div class="header-status">
+
+                <div class="connection-indicator">
+                    <span id="connectionLed" class="status-led offline"></span>
+
+                    <div>
+                        <strong id="connectionText">AGUARDANDO CONEXÃO</strong>
+                        <small>Comunicação OPC</small>
+                    </div>
+                </div>
+
+                <div class="clock">
+                    <strong id="clockTime">--:--:--</strong>
+                    <small id="clockDate">--/--/----</small>
+                </div>
+
+            </div>
+
+        </header>
+
+        <!-- NAVEGACAO -->
+        <nav class="main-navigation">
+
+            <button class="nav-button active" data-page="process">
+                PROCESSO
+            </button>
+
+            <button class="nav-button" data-page="alarms">
+                ALARMES
+                <span id="alarmCounter" class="alarm-counter">0</span>
+            </button>
+
+            <button class="nav-button" data-page="trends">
+                TENDÊNCIAS
+            </button>
+
+            <button class="nav-button" data-page="events">
+                EVENTOS
+            </button>
+
+            <button class="nav-button" data-page="settings">
+                CONFIGURAÇÕES
+            </button>
+
+        </nav>
+
+        <!-- CONTEUDO PRINCIPAL -->
+        <main class="main-content">
+
+            <!-- PAGINA PROCESSO -->
+            <section id="page-process" class="page active">
+
+                <div class="page-heading">
+                    <div>
+                        <h2>Monitoramento do processo</h2>
+                        <p>Visão geral das variáveis operacionais</p>
+                    </div>
+
+                    <div class="update-information">
+                        <span class="status-led offline"></span>
+                        <span id="lastUpdate">Sem dados recebidos</span>
+                    </div>
+                </div>
+
+                <div class="process-summary">
+
+                    <div class="summary-card">
+                        <span class="summary-label">VARIÁVEIS CADASTRADAS</span>
+                        <strong id="totalTags">16</strong>
+                    </div>
+
+                    <div class="summary-card">
+                        <span class="summary-label">COMUNICAÇÃO VÁLIDA</span>
+                        <strong id="validTags">0</strong>
+                    </div>
+
+                    <div class="summary-card">
+                        <span class="summary-label">ALARMES ATIVOS</span>
+                        <strong id="activeAlarms">0</strong>
+                    </div>
+
+                    <div class="summary-card">
+                        <span class="summary-label">VARIÁVEIS INDISPONÍVEIS</span>
+                        <strong id="unavailableTags">16</strong>
+                    </div>
+
+                </div>
+
+                <div class="section-heading">
+                    <h3>Variáveis do processo</h3>
+                    <span>16 TAGS</span>
+                </div>
+
+                <div id="processGrid" class="process-grid">
+
+                    <!-- Os cards serão criados pelo JavaScript -->
+
+                </div>
+
+            </section>
+
+            <!-- PAGINA ALARMES -->
+            <section id="page-alarms" class="page">
+
+                <div class="page-heading">
+                    <div>
+                        <h2>Gerenciamento de alarmes</h2>
+                        <p>Monitoramento e reconhecimento de ocorrências</p>
+                    </div>
+                </div>
+
+                <div class="alarm-summary">
+                    <div class="summary-card">
+                        <span class="summary-label">ATIVOS</span>
+                        <strong id="alarmActiveTotal">0</strong>
+                    </div>
+
+                    <div class="summary-card">
+                        <span class="summary-label">RECONHECIDOS</span>
+                        <strong id="alarmAcknowledgedTotal">0</strong>
+                    </div>
+
+                    <div class="summary-card">
+                        <span class="summary-label">NORMALIZADOS</span>
+                        <strong id="alarmNormalTotal">0</strong>
+                    </div>
+                </div>
+
+                <div id="alarmList" class="data-panel">
+                    Nenhum evento de alarme registrado.
+                </div>
+
+            </section>
+
+            <!-- PAGINA TENDENCIAS -->
+            <section id="page-trends" class="page">
+
+                <div class="page-heading">
+                    <div>
+                        <h2>Tendências históricas</h2>
+                        <p>Consulta e análise das variáveis do processo</p>
+                    </div>
+                </div>
+
+                <div class="filter-panel">
+
+                    <label for="trendTag">Variável</label>
+                    <select id="trendTag">
+                        <option value="">Selecione uma variável</option>
+                    </select>
+
+                    <label for="trendStart">Data inicial</label>
+                    <input type="datetime-local" id="trendStart">
+
+                    <label for="trendEnd">Data final</label>
+                    <input type="datetime-local" id="trendEnd">
+
+                    <button id="searchTrend" class="primary-button">
+                        CONSULTAR
+                    </button>
+
+                    <button id="exportTrend" class="secondary-button">
+                        EXPORTAR PNG
+                    </button>
+
+                </div>
+
+                <div class="chart-panel">
+                    <canvas id="trendCanvas">
+                    </canvas>
+
+                    <div id="trendMessage">
+                        Selecione uma variável e um período para consultar.
+                    </div>
+                </div>
+
+            </section>
+
+            <!-- PAGINA EVENTOS -->
+            <section id="page-events" class="page">
+
+                <div class="page-heading">
+                    <div>
+                        <h2>Histórico de eventos</h2>
+                        <p>Registro cronológico das ocorrências do sistema</p>
+                    </div>
+                </div>
+
+                <div id="eventList" class="data-panel">
+                    Nenhum evento registrado.
+                </div>
+
+            </section>
+
+            <!-- PAGINA CONFIGURACOES -->
+            <section id="page-settings" class="page">
+
+                <div class="page-heading">
+                    <div>
+                        <h2>Configurações</h2>
+                        <p>Parâmetros operacionais do supervisório</p>
+                    </div>
+                </div>
+
+                <div class="settings-panel">
+
+                    <h3>Estado do sistema</h3>
+
+                    <div class="setting-row">
+                        <span>Comunicação OPC</span>
+                        <strong id="settingsOpcStatus">Desconectado</strong>
+                    </div>
+
+                    <div class="setting-row">
+                        <span>Intervalo de aquisição</span>
+                        <strong>1 segundo</strong>
+                    </div>
+
+                    <div class="setting-row">
+                        <span>Gravação histórica</span>
+                        <strong>5 segundos</strong>
+                    </div>
+
+                    <div class="setting-row">
+                        <span>Retenção de histórico</span>
+                        <strong>30 dias</strong>
+                    </div>
+
+                    <div class="setting-row">
+                        <span>Comunicação com CLPs</span>
+                        <strong>SOMENTE LEITURA</strong>
+                    </div>
+
+                </div>
+
+                <div class="settings-panel">
+
+                    <h3>Limites de alarmes</h3>
+
+                    <p>
+                        Os limites serão configurados individualmente
+                        para cada variável, com registro das alterações.
+                    </p>
+
+                    <div id="tagSettings">
+                    </div>
+
+                </div>
+
+            </section>
+
+        </main>
+
+        <!-- RODAPE -->
+        <footer class="main-footer">
+
+            <span>SUPERVISÓRIO ECA</span>
+
+            <span>
+                Sistema local | Monitoramento somente leitura
+            </span>
+
+            <span id="footerClock">
+                Inicializando...
+            </span>
+
+        </footer>
+
+    </div>
+
+    <!-- POPUP DE ALARME -->
+    <div id="alarmOverlay" class="alarm-overlay hidden">
+
+        <div class="alarm-popup">
+
+            <div class="alarm-popup-header">
+                <strong>ALARME DE PROCESSO</strong>
+                <span id="alarmPopupTime">--:--:--</span>
+            </div>
+
+            <div class="alarm-popup-content">
+
+                <h2 id="alarmPopupTag">VARIÁVEL</h2>
+
+                <p id="alarmPopupDescription">
+                    Limite de alarme ultrapassado.
+                </p>
+
+                <strong id="alarmPopupValue">--</strong>
+
+            </div>
+
+            <div class="alarm-popup-actions">
+
+                <button id="acknowledgeAlarm" class="danger-button">
+                    RECONHECER ALARME
+                </button>
+
+            </div>
+
+        </div>
+
+    </div>
+
+    <!-- SCRIPTS -->
+    <script src="js/app.js"></script>
+
+</body>
+</html>
