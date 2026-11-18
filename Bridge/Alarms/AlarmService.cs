@@ -1,6 +1,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using SupervisorioECA.Bridge.Opc;
 using SupervisorioECA.Bridge.Storage;
 
@@ -11,6 +12,7 @@ namespace SupervisorioECA.Bridge.Alarms
         private readonly AlarmEngine engine;
         private readonly AlarmRepository repository;
         private readonly AlarmEventStore eventStore;
+        private readonly AlarmOccurrencePersistence occurrencePersistence;
 
         private readonly Dictionary<string, AlarmDefinition>
             definitions =
@@ -27,6 +29,8 @@ namespace SupervisorioECA.Bridge.Alarms
 
         public event EventHandler AlarmChanged;
 
+        public event Action<AlarmEvent> AlarmEventRecorded;
+
         public AlarmService(
             IList<OpcTagDefinition> tags,
             string configFile,
@@ -35,19 +39,56 @@ namespace SupervisorioECA.Bridge.Alarms
             engine = new AlarmEngine(tags);
 
             repository = new AlarmRepository(configFile);
-
             eventStore = new AlarmEventStore(eventsFolder);
+
+            occurrencePersistence =
+                new AlarmOccurrencePersistence(eventsFolder);
 
             if (tags != null)
             {
                 foreach (OpcTagDefinition tag in tags)
                 {
-                    if (tag != null)
+                    if (tag != null &&
+                        !String.IsNullOrEmpty(tag.TagId))
+                    {
                         tagNames[tag.TagId] = tag.Name;
+                    }
                 }
             }
 
+            RestoreOccurrences();
             LoadDefinitions();
+        }
+
+        private void RestoreOccurrences()
+        {
+            try
+            {
+                IList<AlarmOccurrence> saved =
+                    occurrencePersistence.Restore();
+
+                if (saved == null || saved.Count == 0)
+                    return;
+
+                engine.RestoreOccurrences(saved);
+            }
+            catch (Exception ex)
+            {
+                PublishAlarmEvent(
+                    AlarmEvent.Create(
+                        "RESTORE_ERROR",
+                        "SYSTEM",
+                        "SUPERVISORIO",
+                        "SYSTEM",
+                        "Falha ao recuperar ocorrencias de alarmes: " +
+                            ex.Message,
+                        null,
+                        null,
+                        "SYSTEM",
+                        "ERROR"
+                    )
+                );
+            }
         }
 
         private void LoadDefinitions()
@@ -55,10 +96,17 @@ namespace SupervisorioECA.Bridge.Alarms
             IList<AlarmDefinition> saved =
                 repository.Load();
 
+            if (saved == null)
+                return;
+
             lock (syncRoot)
             {
                 foreach (AlarmDefinition definition in saved)
                 {
+                    if (definition == null ||
+                        String.IsNullOrEmpty(definition.TagId))
+                        continue;
+
                     if (!tagNames.ContainsKey(definition.TagId))
                         continue;
 
@@ -74,54 +122,136 @@ namespace SupervisorioECA.Bridge.Alarms
             if (values == null || values.Count == 0)
                 return;
 
-            IList<AlarmOccurrence> before =
-                engine.GetOccurrences();
+            // Somente leituras OPC validas participam
+            // da avaliacao dos alarmes.
+            List<OpcValue> validValues =
+                new List<OpcValue>();
 
-            HashSet<string> previousIds =
-                new HashSet<string>();
+            foreach (OpcValue value in values)
+            {
+                if (value == null)
+                    continue;
 
-            foreach (AlarmOccurrence occurrence in before)
-                previousIds.Add(occurrence.Id);
+                if (!value.IsGood())
+                    continue;
 
-            engine.Evaluate(values);
+                if (String.IsNullOrEmpty(value.TagId))
+                    continue;
 
-            IList<AlarmOccurrence> after =
-                engine.GetOccurrences();
+                validValues.Add(value);
+            }
+
+            // Falha de comunicacao nao significa normalizacao.
+            if (validValues.Count == 0)
+                return;
+
+            Dictionary<long, string> previousStates =
+                new Dictionary<long, string>();
+
+            IList<AlarmOccurrence> after;
+
+            lock (syncRoot)
+            {
+                IList<AlarmOccurrence> before =
+                    engine.GetOccurrences();
+
+                foreach (AlarmOccurrence occurrence in before)
+                {
+                    if (occurrence == null ||
+                        occurrence.Id <= 0)
+                        continue;
+
+                    previousStates[occurrence.Id] =
+                        occurrence.State;
+                }
+
+                engine.Evaluate(validValues);
+
+                after = engine.GetOccurrences();
+            }
+
+            bool changed = false;
 
             foreach (AlarmOccurrence occurrence in after)
             {
-                if (previousIds.Contains(occurrence.Id))
+                if (occurrence == null ||
+                    occurrence.Id <= 0)
                     continue;
 
-                SaveEvent(
-                    "TRIGGERED",
-                    occurrence,
-                    occurrence.TriggerValue,
-                    occurrence.AlarmLimit,
-                    ""
-                );
-            }
+                string previousState;
 
-            foreach (AlarmOccurrence occurrence in before)
-            {
-                if (occurrence.State == "NORMALIZED")
+                bool existed = previousStates.TryGetValue(
+                    occurrence.Id,
+                    out previousState
+                );
+
+                if (!existed)
                 {
+                    occurrencePersistence.Save(occurrence);
+
                     SaveEvent(
-                        "NORMALIZED",
+                        "TRIGGERED",
                         occurrence,
                         occurrence.TriggerValue,
                         occurrence.AlarmLimit,
                         ""
                     );
+
+                    changed = true;
+                    continue;
+                }
+
+                if (!String.Equals(
+                    previousState,
+                    occurrence.State,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    occurrencePersistence.Save(occurrence);
+
+                    if (String.Equals(
+                        occurrence.State,
+                        "NORMALIZED",
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        SaveEvent(
+                            "NORMALIZED",
+                            occurrence,
+                            occurrence.TriggerValue,
+                            occurrence.AlarmLimit,
+                            ""
+                        );
+                    }
+
+                    changed = true;
                 }
             }
 
-            if (after.Count != before.Count)
+            if (changed)
                 RaiseAlarmChanged();
         }
 
         public bool Acknowledge(string alarmId, string user)
         {
+            long occurrenceId;
+
+            if (String.IsNullOrEmpty(alarmId))
+                return false;
+
+            if (!Int64.TryParse(
+                alarmId,
+                NumberStyles.Integer,
+                CultureInfo.InvariantCulture,
+                out occurrenceId))
+                return false;
+
+            return Acknowledge(occurrenceId, user);
+        }
+
+        public bool Acknowledge(long occurrenceId, string user)
+        {
+            if (occurrenceId <= 0)
+                return false;
+
             if (String.IsNullOrEmpty(user))
                 user = "OPERADOR";
 
@@ -130,7 +260,7 @@ namespace SupervisorioECA.Bridge.Alarms
             lock (syncRoot)
             {
                 acknowledged = engine.Acknowledge(
-                    alarmId,
+                    occurrenceId,
                     user
                 );
             }
@@ -139,10 +269,12 @@ namespace SupervisorioECA.Bridge.Alarms
                 return false;
 
             AlarmOccurrence occurrence =
-                FindOccurrence(alarmId);
+                FindOccurrence(occurrenceId);
 
             if (occurrence != null)
             {
+                occurrencePersistence.Save(occurrence);
+
                 SaveEvent(
                     "ACKNOWLEDGED",
                     occurrence,
@@ -164,7 +296,8 @@ namespace SupervisorioECA.Bridge.Alarms
             if (definition == null)
                 return false;
 
-            if (!tagNames.ContainsKey(definition.TagId))
+            if (String.IsNullOrEmpty(definition.TagId) ||
+                !tagNames.ContainsKey(definition.TagId))
                 return false;
 
             if (String.IsNullOrEmpty(user))
@@ -182,6 +315,18 @@ namespace SupervisorioECA.Bridge.Alarms
                     out previous
                 );
 
+                bool oldHighEnabled =
+                    previous != null && previous.HighAlarmEnabled;
+
+                double oldHighLimit =
+                    previous != null ? previous.HighLimit : 0;
+
+                bool oldLowEnabled =
+                    previous != null && previous.LowAlarmEnabled;
+
+                double oldLowLimit =
+                    previous != null ? previous.LowLimit : 0;
+
                 definition.ModifiedBy = user;
                 definition.LastModified = DateTime.Now;
 
@@ -197,30 +342,28 @@ namespace SupervisorioECA.Bridge.Alarms
 
                 if (previous != null)
                 {
-                    if (previous.HighAlarmEnabled !=
-                        definition.HighAlarmEnabled ||
-                        previous.HighLimit != definition.HighLimit)
+                    if (oldHighEnabled != definition.HighAlarmEnabled ||
+                        oldHighLimit != definition.HighLimit)
                     {
                         SaveLimitChange(
                             definition.TagId,
                             "HIGH",
-                            previous.HighAlarmEnabled
-                                ? (double?)previous.HighLimit : null,
+                            oldHighEnabled
+                                ? (double?)oldHighLimit : null,
                             definition.HighAlarmEnabled
                                 ? (double?)definition.HighLimit : null,
                             user
                         );
                     }
 
-                    if (previous.LowAlarmEnabled !=
-                        definition.LowAlarmEnabled ||
-                        previous.LowLimit != definition.LowLimit)
+                    if (oldLowEnabled != definition.LowAlarmEnabled ||
+                        oldLowLimit != definition.LowLimit)
                     {
                         SaveLimitChange(
                             definition.TagId,
                             "LOW",
-                            previous.LowAlarmEnabled
-                                ? (double?)previous.LowLimit : null,
+                            oldLowEnabled
+                                ? (double?)oldLowLimit : null,
                             definition.LowAlarmEnabled
                                 ? (double?)definition.LowLimit : null,
                             user
@@ -292,14 +435,15 @@ namespace SupervisorioECA.Bridge.Alarms
             }
         }
 
-        private AlarmOccurrence FindOccurrence(string alarmId)
+        private AlarmOccurrence FindOccurrence(long occurrenceId)
         {
             IList<AlarmOccurrence> occurrences =
                 engine.GetOccurrences();
 
             foreach (AlarmOccurrence occurrence in occurrences)
             {
-                if (occurrence.Id == alarmId)
+                if (occurrence != null &&
+                    occurrence.Id == occurrenceId)
                     return occurrence;
             }
 
@@ -326,7 +470,7 @@ namespace SupervisorioECA.Bridge.Alarms
                     user
                 );
 
-            eventStore.Save(alarmEvent);
+            PublishAlarmEvent(alarmEvent);
         }
 
         private void SaveEvent(
@@ -336,6 +480,9 @@ namespace SupervisorioECA.Bridge.Alarms
             double? limit,
             string user)
         {
+            if (occurrence == null)
+                return;
+
             string name = occurrence.TagName;
 
             if (String.IsNullOrEmpty(name) &&
@@ -356,7 +503,32 @@ namespace SupervisorioECA.Bridge.Alarms
                 occurrence.State
             );
 
+            PublishAlarmEvent(alarmEvent);
+        }
+
+        private void PublishAlarmEvent(AlarmEvent alarmEvent)
+        {
+            if (alarmEvent == null)
+                return;
+
+            // Historico individual de alarmes.
             eventStore.Save(alarmEvent);
+
+            // Notifica o historico unificado.
+            Action<AlarmEvent> handler = AlarmEventRecorded;
+
+            if (handler != null)
+            {
+                try
+                {
+                    handler(alarmEvent);
+                }
+                catch
+                {
+                    // Falha no historico unificado nao deve
+                    // interromper a aquisicao ou os alarmes.
+                }
+            }
         }
 
         private void RaiseAlarmChanged()

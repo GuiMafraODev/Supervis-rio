@@ -37,6 +37,11 @@ namespace SupervisorioECA.Bridge.Opc
                    Quality == "Good";
         }
 
+        public bool IsUsable()
+        {
+            return IsGood();
+        }
+
         public static OpcValue CreateGood(
             string tagId,
             double value,
@@ -50,6 +55,7 @@ namespace SupervisorioECA.Bridge.Opc
             result.Quality = "Good";
             result.Timestamp = timestamp;
             result.IsConnected = true;
+            result.ErrorMessage = String.Empty;
 
             return result;
         }
@@ -62,10 +68,40 @@ namespace SupervisorioECA.Bridge.Opc
             OpcValue result = new OpcValue();
 
             result.TagId = tagId;
-            result.Quality = quality;
-            result.ErrorMessage = errorMessage;
+            result.Value = 0.0;
+            result.HasValue = false;
+            result.Quality = String.IsNullOrEmpty(quality)
+                ? "Bad"
+                : quality;
+
             result.Timestamp = DateTime.Now;
             result.IsConnected = false;
+
+            result.ErrorMessage = errorMessage ?? String.Empty;
+
+            return result;
+        }
+
+        public static OpcValue CreateBad(
+            string tagId,
+            string quality,
+            string errorMessage,
+            bool connectionAvailable)
+        {
+            OpcValue result = new OpcValue();
+
+            result.TagId = tagId;
+            result.Value = 0.0;
+            result.HasValue = false;
+
+            result.Quality = String.IsNullOrEmpty(quality)
+                ? "Bad"
+                : quality;
+
+            result.Timestamp = DateTime.Now;
+            result.IsConnected = connectionAvailable;
+
+            result.ErrorMessage = errorMessage ?? String.Empty;
 
             return result;
         }

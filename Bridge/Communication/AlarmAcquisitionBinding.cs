@@ -1,6 +1,8 @@
 
 using System;
+using System.Collections.Generic;
 using SupervisorioECA.Bridge.Alarms;
+using SupervisorioECA.Bridge.Opc;
 
 namespace SupervisorioECA.Bridge.Communication
 {
@@ -36,67 +38,92 @@ namespace SupervisorioECA.Bridge.Communication
             lock (syncRoot)
             {
                 if (disposed)
+                {
                     throw new ObjectDisposedException(
                         "AlarmAcquisitionBinding"
                     );
+                }
 
                 if (started)
                     return;
 
-                acquisition.ValuesUpdated +=
-                    OnValuesUpdated;
+                acquisition.ValuesUpdated += OnValuesUpdated;
 
                 started = true;
+            }
 
-                if (logger != null)
-                    logger.Info(
-                        "Integracao entre aquisicao OPC e alarmes iniciada."
-                    );
+            if (logger != null)
+            {
+                logger.Info(
+                    "Integracao entre aquisicao OPC e alarmes iniciada."
+                );
             }
         }
 
         public void Stop()
         {
+            bool wasStarted;
+
             lock (syncRoot)
             {
+                wasStarted = started;
+
                 if (!started)
                     return;
 
-                acquisition.ValuesUpdated -=
-                    OnValuesUpdated;
+                acquisition.ValuesUpdated -= OnValuesUpdated;
 
                 started = false;
+            }
 
-                if (logger != null)
-                    logger.Info(
-                        "Integracao entre aquisicao OPC e alarmes encerrada."
-                    );
+            if (wasStarted && logger != null)
+            {
+                logger.Info(
+                    "Integracao entre aquisicao OPC e alarmes encerrada."
+                );
             }
         }
 
         private void OnValuesUpdated(
             object sender,
-            OpcValuesUpdatedEventArgs args)
+            EventArgs args)
         {
-            if (args == null || args.Values == null)
-                return;
+            lock (syncRoot)
+            {
+                if (!started || disposed)
+                    return;
+            }
 
             try
             {
-                alarmService.Evaluate(args.Values);
+                IList<OpcValue> values =
+                    acquisition.GetLatestValues();
+
+                if (values == null || values.Count == 0)
+                    return;
+
+                alarmService.Evaluate(values);
             }
             catch (Exception ex)
             {
                 if (logger != null)
+                {
                     logger.Error(
                         "Falha ao avaliar alarmes recebidos via OPC.",
                         ex
                     );
+                }
             }
         }
 
         public void Dispose()
         {
+            lock (syncRoot)
+            {
+                if (disposed)
+                    return;
+            }
+
             Stop();
 
             lock (syncRoot)

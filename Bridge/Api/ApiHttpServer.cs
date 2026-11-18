@@ -1,64 +1,90 @@
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
+using System.Text;
 using System.Threading;
 using SupervisorioECA.Bridge.Communication;
 
 namespace SupervisorioECA.Bridge.Api
 {
-    public class ApiHttpServer : IDisposable
+    public sealed class ApiHttpServer : IDisposable
     {
-        private readonly HttpListener listener;
-        private readonly ApiRequestHandler apiHandler;
-        private readonly TrendExportController exportController;
+        private readonly int port;
         private readonly string webRoot;
+        private readonly ApiRequestHandler apiHandler;
+        private readonly TrendExportController trendExportController;
         private readonly BridgeLogger logger;
 
-        private Thread worker;
+        private HttpListener listener;
+        private Thread listenerThread;
         private volatile bool running;
+
+        private readonly Dictionary<string, string> allowedFiles =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         public ApiHttpServer(
             int port,
             string webRoot,
             ApiRequestHandler apiHandler,
-            TrendExportController exportController,
+            TrendExportController trendExportController,
             BridgeLogger logger)
         {
-            if (port < 1 || port > 65535)
-                throw new ArgumentOutOfRangeException("port");
-
-            if (String.IsNullOrEmpty(webRoot))
-                throw new ArgumentException("Pasta Web nao informada.");
-
-            if (apiHandler == null)
-                throw new ArgumentNullException("apiHandler");
-
+            this.port = port;
             this.webRoot = Path.GetFullPath(webRoot);
             this.apiHandler = apiHandler;
-            this.exportController = exportController;
+            this.trendExportController = trendExportController;
             this.logger = logger;
 
-            listener = new HttpListener();
-            listener.Prefixes.Add(
-                "http://127.0.0.1:" + port + "/"
-            );
+            RegisterFiles();
+        }
+
+        private void RegisterFiles()
+        {
+            allowedFiles["/"] = "index.html";
+            allowedFiles["/index.html"] = "index.html";
+
+            allowedFiles["/css/style.css"] =
+                Path.Combine("css", "style.css");
+
+            allowedFiles["/js/app.js"] =
+                Path.Combine("js", "app.js");
+
+            allowedFiles["/js/alarms.js"] =
+                Path.Combine("js", "alarms.js");
+
+            allowedFiles["/js/trends.js"] =
+                Path.Combine("js", "trends.js");
+
+            allowedFiles["/js/events.js"] =
+                Path.Combine("js", "events.js");
+
+            allowedFiles["/data/tags.json"] =
+                Path.Combine("..", "Data", "Config", "tags.json");
         }
 
         public void Start()
         {
-            if (running)
-                return;
+            if (running) return;
+
+            listener = new HttpListener();
+
+            listener.Prefixes.Add(
+                "http://127.0.0.1:" + port + "/");
 
             listener.Start();
+
             running = true;
 
-            worker = new Thread(ListenLoop);
-            worker.IsBackground = true;
-            worker.Name = "SupervisorioECA.HttpServer";
-            worker.Start();
+            listenerThread = new Thread(ListenLoop);
+            listenerThread.IsBackground = true;
+            listenerThread.Name = "SupervisorioECA HTTP";
 
-            Log("Servidor HTTP iniciado.");
+            listenerThread.Start();
+
+            if (logger != null)
+                logger.Info("Servidor HTTP iniciado em localhost:" + port);
         }
 
         private void ListenLoop()
@@ -70,14 +96,18 @@ namespace SupervisorioECA.Bridge.Api
                     HttpListenerContext context =
                         listener.GetContext();
 
-                    ProcessRequest(context);
+                    ThreadPool.QueueUserWorkItem(
+                        delegate(object state)
+                        {
+                            HandleRequest(
+                                (HttpListenerContext)state);
+                        },
+                        context);
                 }
                 catch (HttpListenerException)
                 {
-                    if (!running)
-                        break;
-
-                    Log("Falha ao receber requisicao HTTP.");
+                    if (running && logger != null)
+                        logger.Warning("Falha ao receber requisição HTTP.");
                 }
                 catch (ObjectDisposedException)
                 {
@@ -85,36 +115,74 @@ namespace SupervisorioECA.Bridge.Api
                 }
                 catch (Exception ex)
                 {
-                    Log("Erro HTTP: " + ex.Message);
+                    if (running && logger != null)
+                        logger.Error("Erro no servidor HTTP: " + ex.Message);
                 }
             }
         }
 
-        private void ProcessRequest(HttpListenerContext context)
+        private void HandleRequest(HttpListenerContext context)
         {
-            string path = context.Request.Url.AbsolutePath;
-
             try
             {
-                if (String.Equals(
-                    path,
-                    "/api/trends/export",
-                    StringComparison.OrdinalIgnoreCase))
+                string method = context.Request.HttpMethod.ToUpperInvariant();
+                string path = context.Request.Url.AbsolutePath;
+
+                if (method != "GET" && method != "POST")
                 {
-                    if (exportController != null &&
-                        exportController.Handle(context))
-                        return;
+                    WriteResponse(
+                        context.Response,
+                        405,
+                        "Método não permitido.",
+                        "text/plain");
+
+                    return;
                 }
 
-                if (path.StartsWith(
-                    "/api/",
-                    StringComparison.OrdinalIgnoreCase) ||
-                    String.Equals(
-                    path,
-                    "/api",
-                    StringComparison.OrdinalIgnoreCase))
+                if (path.StartsWith("/api/", StringComparison.OrdinalIgnoreCase))
                 {
+                    if (path.Equals(
+                        "/api/trends/export",
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (method != "GET")
+                        {
+                            WriteResponse(
+                                context.Response,
+                                405,
+                                "Método não permitido.",
+                                "text/plain");
+
+                            return;
+                        }
+
+                        trendExportController.Handle(context);
+                        return;
+                    }
+
+                    if (apiHandler == null)
+                    {
+                        WriteResponse(
+                            context.Response,
+                            503,
+                            "API indisponível.",
+                            "text/plain");
+
+                        return;
+                    }
+
                     apiHandler.Handle(context);
+                    return;
+                }
+
+                if (method != "GET")
+                {
+                    WriteResponse(
+                        context.Response,
+                        405,
+                        "Método não permitido.",
+                        "text/plain");
+
                     return;
                 }
 
@@ -122,12 +190,16 @@ namespace SupervisorioECA.Bridge.Api
             }
             catch (Exception ex)
             {
-                Log("Erro ao processar requisicao: " + ex.Message);
+                if (logger != null)
+                    logger.Error("Erro ao processar requisição: " + ex.Message);
 
                 try
                 {
-                    context.Response.StatusCode = 500;
-                    context.Response.Close();
+                    WriteResponse(
+                        context.Response,
+                        500,
+                        "Erro interno do servidor.",
+                        "text/plain");
                 }
                 catch
                 {
@@ -137,122 +209,167 @@ namespace SupervisorioECA.Bridge.Api
 
         private void ServeStaticFile(
             HttpListenerContext context,
-            string path)
+            string requestedPath)
         {
-            if (!String.Equals(
-                context.Request.HttpMethod,
-                "GET",
-                StringComparison.OrdinalIgnoreCase))
-            {
-                context.Response.StatusCode = 405;
-                context.Response.Close();
-                return;
-            }
-
             string relativePath;
 
-            if (path == "/" || path == "/index.html")
-                relativePath = "index.html";
-            else if (path == "/css/style.css")
-                relativePath = Path.Combine("css", "style.css");
-            else if (path == "/js/app.js")
-                relativePath = Path.Combine("js", "app.js");
-            else if (path == "/Data/Config/tags.json")
-                relativePath = null;
-            else
+            if (!allowedFiles.TryGetValue(
+                requestedPath,
+                out relativePath))
             {
-                context.Response.StatusCode = 404;
-                context.Response.Close();
+                WriteResponse(
+                    context.Response,
+                    404,
+                    "Arquivo não encontrado.",
+                    "text/plain");
+
                 return;
             }
 
-            string filePath;
+            string fullPath = Path.GetFullPath(
+                Path.Combine(webRoot, relativePath));
 
-            if (relativePath == null)
-            {
-                filePath = Path.GetFullPath(
-                    Path.Combine(
-                        webRoot,
-                        "..",
-                        "Data",
-                        "Config",
-                        "tags.json"
-                    )
-                );
-            }
-            else
-            {
-                filePath = Path.GetFullPath(
-                    Path.Combine(webRoot, relativePath)
-                );
-            }
+            string rootPrefix = webRoot.TrimEnd(
+                Path.DirectorySeparatorChar,
+                Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
 
-            if (!File.Exists(filePath))
+            if (!fullPath.StartsWith(
+                rootPrefix,
+                StringComparison.OrdinalIgnoreCase) &&
+                !String.Equals(
+                    fullPath,
+                    webRoot,
+                    StringComparison.OrdinalIgnoreCase))
             {
-                context.Response.StatusCode = 404;
-                context.Response.Close();
+                WriteResponse(
+                    context.Response,
+                    403,
+                    "Acesso negado.",
+                    "text/plain");
+
                 return;
             }
 
-            byte[] content = File.ReadAllBytes(filePath);
+            if (!File.Exists(fullPath))
+            {
+                WriteResponse(
+                    context.Response,
+                    404,
+                    "Arquivo não encontrado.",
+                    "text/plain");
+
+                return;
+            }
+
+            byte[] content = File.ReadAllBytes(fullPath);
+
+            string contentType = GetContentType(fullPath);
 
             context.Response.StatusCode = 200;
-            context.Response.ContentType = GetContentType(filePath);
+            context.Response.ContentType = contentType;
+            context.Response.ContentEncoding = Encoding.UTF8;
             context.Response.ContentLength64 = content.Length;
             context.Response.Headers["Cache-Control"] = "no-cache";
 
-            using (Stream output = context.Response.OutputStream)
-            {
-                output.Write(content, 0, content.Length);
-            }
+            context.Response.OutputStream.Write(
+                content,
+                0,
+                content.Length);
+
+            context.Response.OutputStream.Close();
         }
 
-        private string GetContentType(string file)
+        private string GetContentType(string path)
         {
-            switch (Path.GetExtension(file).ToLowerInvariant())
+            string extension = Path.GetExtension(path).ToLowerInvariant();
+
+            switch (extension)
             {
                 case ".html":
-                    return "text/html; charset=utf-8";
+                    return "text/html";
+
                 case ".css":
-                    return "text/css; charset=utf-8";
+                    return "text/css";
+
                 case ".js":
-                    return "application/javascript; charset=utf-8";
+                    return "application/javascript";
+
                 case ".json":
-                    return "application/json; charset=utf-8";
+                    return "application/json";
+
+                case ".csv":
+                    return "text/csv";
+
+                case ".png":
+                    return "image/png";
+
+                case ".jpg":
+                case ".jpeg":
+                    return "image/jpeg";
+
+                case ".ico":
+                    return "image/x-icon";
+
                 default:
                     return "application/octet-stream";
             }
         }
 
-        private void Log(string message)
+        private void WriteResponse(
+            HttpListenerResponse response,
+            int status,
+            string content,
+            string contentType)
         {
-            if (logger != null)
-                logger.Info(message);
+            byte[] bytes = Encoding.UTF8.GetBytes(content);
+
+            response.StatusCode = status;
+            response.ContentType = contentType + "; charset=utf-8";
+            response.ContentLength64 = bytes.Length;
+
+            response.OutputStream.Write(bytes, 0, bytes.Length);
+            response.OutputStream.Close();
         }
 
         public void Stop()
         {
             running = false;
 
-            try
+            if (listener != null)
             {
-                if (listener.IsListening)
+                try
+                {
                     listener.Stop();
+                    listener.Close();
+                }
+                catch
+                {
+                }
+
+                listener = null;
             }
-            catch
+
+            if (listenerThread != null)
             {
+                try
+                {
+                    listenerThread.Join(3000);
+                }
+                catch
+                {
+                }
+
+                listenerThread = null;
             }
 
-            if (worker != null && worker.IsAlive)
-                worker.Join(2000);
-
-            worker = null;
+            if (logger != null)
+                logger.Info("Servidor HTTP encerrado.");
         }
 
         public void Dispose()
         {
             Stop();
-            listener.Close();
         }
     }
 }

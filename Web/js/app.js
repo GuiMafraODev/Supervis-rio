@@ -1,480 +1,353 @@
 
-/* =====================================================
-   SUPERVISORIO ECA
-   CONTROLADOR PRINCIPAL DA INTERFACE
-   Arquivo: app.js
-   ===================================================== */
-
 (function () {
-
     "use strict";
 
-    var configuration = null;
+    var API = "/api";
+    var REFRESH_INTERVAL = 1000;
     var tags = [];
+    var lastAlarmSignature = "";
+    var busy = false;
 
-    /* -----------------------------------------------
-       FUNCOES AUXILIARES
-    ----------------------------------------------- */
-
-    function getElement(id) {
+    function byId(id) {
         return document.getElementById(id);
     }
 
-    function createElement(tag, className, text) {
-        var element = document.createElement(tag);
+    function request(path, callback) {
+        var xhr = new XMLHttpRequest();
 
-        if (className) {
-            element.className = className;
-        }
+        xhr.open("GET", API + path, true);
+        xhr.timeout = 5000;
 
-        if (text !== undefined && text !== null) {
-            element.textContent = text;
-        }
+        xhr.onreadystatechange = function () {
+            if (xhr.readyState !== 4) return;
 
-        return element;
+            if (xhr.status >= 200 && xhr.status < 300) {
+                try {
+                    var response = JSON.parse(xhr.responseText);
+
+                    if (response.success === false) {
+                        callback(response.message || "Falha na API");
+                        return;
+                    }
+
+                    callback(null, response.data);
+                } catch (e) {
+                    callback("Resposta JSON inválida");
+                }
+            } else {
+                callback("HTTP " + xhr.status);
+            }
+        };
+
+        xhr.onerror = function () {
+            callback("Falha de comunicação com a Bridge");
+        };
+
+        xhr.ontimeout = function () {
+            callback("Tempo limite da API excedido");
+        };
+
+        xhr.send();
     }
 
-    /* -----------------------------------------------
-       RELOGIO
-    ----------------------------------------------- */
+    function formatValue(value) {
+        if (value === null || value === undefined) {
+            return "--";
+        }
+
+        if (typeof value !== "number" || !isFinite(value)) {
+            return "--";
+        }
+
+        return value.toLocaleString("pt-BR", {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+        });
+    }
 
     function updateClock() {
+        var element = byId("clock");
 
-        var now = new Date();
+        if (!element) return;
 
-        var time = now.toLocaleTimeString("pt-BR");
-        var date = now.toLocaleDateString("pt-BR");
+        element.textContent =
+            new Date().toLocaleString("pt-BR");
+    }
 
-        if (getElement("clockTime")) {
-            getElement("clockTime").textContent = time;
+    function setConnection(connected, message) {
+        var element = byId("connectionStatus");
+
+        if (!element) {
+            element = document.querySelector(
+                ".connection-status"
+            );
         }
 
-        if (getElement("clockDate")) {
-            getElement("clockDate").textContent = date;
-        }
+        if (element) {
+            element.textContent = message;
 
-        if (getElement("footerClock")) {
-            getElement("footerClock").textContent =
-                date + " | " + time;
+            element.className = connected
+                ? "connection-status connected"
+                : "connection-status disconnected";
         }
     }
 
-    /* -----------------------------------------------
-       NAVEGACAO
-    ----------------------------------------------- */
+    function createCard(tag) {
+        var card = document.createElement("div");
 
-    function initializeNavigation() {
+        card.className = "process-card";
+        card.id = "tag-" + tag.id;
 
-        var buttons = document.querySelectorAll(".nav-button");
+        var title = document.createElement("div");
+        title.className = "process-card-title";
+        title.textContent = tag.name || tag.id;
 
-        for (var i = 0; i < buttons.length; i++) {
+        var value = document.createElement("div");
+        value.className = "process-card-value";
+        value.textContent = "--";
 
-            buttons[i].addEventListener("click", function () {
+        value.id = "value-" + tag.id;
 
-                var pageName = this.getAttribute("data-page");
+        var unit = document.createElement("div");
+        unit.className = "process-card-unit";
+        unit.textContent = tag.unit || "";
 
-                showPage(pageName);
+        var quality = document.createElement("div");
+        quality.className = "process-card-quality";
+        quality.textContent = "AGUARDANDO DADOS";
+        quality.id = "quality-" + tag.id;
 
-            });
-        }
+        card.appendChild(title);
+        card.appendChild(value);
+        card.appendChild(unit);
+        card.appendChild(quality);
+
+        card.addEventListener("click", function () {
+            var select = byId("trendTag");
+
+            if (select) {
+                select.value = tag.id;
+            }
+
+            var button = document.querySelector(
+                '[data-section="trends"]'
+            );
+
+            if (button) button.click();
+        });
+
+        return card;
     }
 
-    function showPage(pageName) {
+    function renderTags(data) {
+        var container = byId("processGrid");
 
-        var pages = document.querySelectorAll(".page");
-        var buttons = document.querySelectorAll(".nav-button");
+        if (!container || !data) return;
 
-        for (var i = 0; i < pages.length; i++) {
-            pages[i].classList.remove("active");
+        if (!Array.isArray(data)) return;
+
+        tags = data;
+        container.innerHTML = "";
+
+        var select = byId("trendTag");
+
+        if (select) {
+            select.innerHTML = "";
         }
 
-        for (var j = 0; j < buttons.length; j++) {
-            buttons[j].classList.remove("active");
-        }
+        data.forEach(function (tag) {
+            container.appendChild(createCard(tag));
 
-        var selectedPage = getElement("page-" + pageName);
+            if (select) {
+                var option = document.createElement("option");
 
-        if (selectedPage) {
-            selectedPage.classList.add("active");
-        }
+                option.value = tag.id;
+                option.textContent = tag.name || tag.id;
 
-        var selectedButton = document.querySelector(
-            '.nav-button[data-page="' + pageName + '"]'
-        );
-
-        if (selectedButton) {
-            selectedButton.classList.add("active");
-        }
+                select.appendChild(option);
+            }
+        });
     }
 
-    /* -----------------------------------------------
-       CONEXAO
-    ----------------------------------------------- */
+    function updateTagValues(data) {
+        if (!Array.isArray(data)) return;
 
-    function setConnectionStatus(status, message) {
+        data.forEach(function (tag) {
+            var valueElement = byId("value-" + tag.id);
+            var qualityElement = byId("quality-" + tag.id);
 
-        var led = getElement("connectionLed");
-        var text = getElement("connectionText");
-        var settings = getElement("settingsOpcStatus");
+            if (!valueElement || !qualityElement) return;
 
-        if (!led || !text) {
-            return;
-        }
+            if (tag.value === null ||
+                tag.value === undefined ||
+                tag.quality !== "Good") {
 
-        led.className = "status-led " + status;
-        text.textContent = message;
+                valueElement.textContent = "--";
+                qualityElement.textContent =
+                    tag.quality || "SEM DADOS";
 
-        if (settings) {
-            settings.textContent = message;
-        }
-    }
+                qualityElement.className =
+                    "process-card-quality bad";
 
-    /* -----------------------------------------------
-       CARREGAMENTO DA CONFIGURACAO
-    ----------------------------------------------- */
-
-    function loadConfiguration() {
-
-        var request = new XMLHttpRequest();
-
-        request.open(
-            "GET",
-            "../Data/Config/tags.json",
-            true
-        );
-
-        request.onreadystatechange = function () {
-
-            if (request.readyState !== 4) {
                 return;
             }
 
-            if (request.status === 200) {
+            valueElement.textContent =
+                formatValue(tag.value);
 
-                try {
-
-                    configuration = JSON.parse(request.responseText);
-
-                    if (!configuration.tags ||
-                        !Array.isArray(configuration.tags)) {
-
-                        throw new Error("Lista de tags inválida.");
-                    }
-
-                    tags = configuration.tags;
-
-                    initializeApplication();
-
-                } catch (error) {
-
-                    showConfigurationError(
-                        "Erro ao interpretar tags.json: " + error.message
-                    );
-                }
-
-            } else {
-
-                showConfigurationError(
-                    "Não foi possível carregar Data/Config/tags.json."
-                );
-            }
-        };
-
-        request.onerror = function () {
-
-            showConfigurationError(
-                "Falha ao acessar o arquivo de configuração."
-            );
-        };
-
-        request.send(null);
+            qualityElement.textContent = "QUALIDADE GOOD";
+            qualityElement.className =
+                "process-card-quality good";
+        });
     }
 
-    function showConfigurationError(message) {
+    function renderAlarms(data) {
+        if (!Array.isArray(data)) return;
 
-        setConnectionStatus(
-            "offline",
-            "CONFIGURAÇÃO INDISPONÍVEL"
-        );
+        var container = byId("alarmList");
 
-        var grid = getElement("processGrid");
+        if (!container) return;
 
-        if (grid) {
+        var signature = JSON.stringify(data);
 
-            grid.innerHTML = "";
+        if (signature === lastAlarmSignature) return;
 
-            grid.appendChild(
-                createElement(
-                    "div",
-                    "data-panel",
-                    message
-                )
-            );
-        }
-
-        if (getElement("totalTags")) {
-            getElement("totalTags").textContent = "0";
-        }
-
-        if (getElement("validTags")) {
-            getElement("validTags").textContent = "0";
-        }
-
-        if (getElement("unavailableTags")) {
-            getElement("unavailableTags").textContent = "--";
-        }
-    }
-
-    /* -----------------------------------------------
-       INICIALIZACAO DA APLICACAO
-    ----------------------------------------------- */
-
-    function initializeApplication() {
-
-        setConnectionStatus(
-            "offline",
-            "AGUARDANDO BRIDGE OPC"
-        );
-
-        renderProcessCards();
-        renderTrendOptions();
-        renderTagSettings();
-        updateSummary();
-
-        if (getElement("lastUpdate")) {
-            getElement("lastUpdate").textContent =
-                "Aguardando dados da bridge OPC";
-        }
-    }
-
-    /* -----------------------------------------------
-       CARDS DO PROCESSO
-    ----------------------------------------------- */
-
-    function renderProcessCards() {
-
-        var grid = getElement("processGrid");
-
-        if (!grid) {
-            return;
-        }
-
-        grid.innerHTML = "";
-
-        for (var i = 0; i < tags.length; i++) {
-
-            var tag = tags[i];
-
-            var card = createElement(
-                "div",
-                "process-card unavailable"
-            );
-
-            card.setAttribute("data-tag-id", tag.id);
-
-            var header = createElement(
-                "div",
-                "process-card-header"
-            );
-
-            var title = createElement(
-                "h3",
-                "",
-                tag.name
-            );
-
-            var valueArea = createElement(
-                "div",
-                "process-card-value"
-            );
-
-            valueArea.setAttribute("data-value", tag.id);
-            valueArea.textContent = "--";
-
-            var unit = createElement(
-                "span",
-                "process-card-unit",
-                tag.unit || ""
-            );
-
-            valueArea.appendChild(unit);
-
-            var status = createElement(
-                "div",
-                "process-card-status",
-                "AGUARDANDO COMUNICAÇÃO"
-            );
-
-            status.setAttribute("data-status", tag.id);
-
-            header.appendChild(title);
-
-            card.appendChild(header);
-            card.appendChild(valueArea);
-            card.appendChild(status);
-
-            card.addEventListener("click", function () {
-
-                var tagId = this.getAttribute("data-tag-id");
-
-                openTrendForTag(tagId);
-
-            });
-
-            grid.appendChild(card);
-        }
-    }
-
-    /* -----------------------------------------------
-       RESUMO DO PROCESSO
-    ----------------------------------------------- */
-
-    function updateSummary() {
-
-        var total = tags.length;
-
-        if (getElement("totalTags")) {
-            getElement("totalTags").textContent = total;
-        }
-
-        if (getElement("validTags")) {
-            getElement("validTags").textContent = "0";
-        }
-
-        if (getElement("activeAlarms")) {
-            getElement("activeAlarms").textContent = "0";
-        }
-
-        if (getElement("unavailableTags")) {
-            getElement("unavailableTags").textContent = total;
-        }
-    }
-
-    /* -----------------------------------------------
-       LISTA DE VARIAVEIS PARA TENDENCIAS
-    ----------------------------------------------- */
-
-    function renderTrendOptions() {
-
-        var select = getElement("trendTag");
-
-        if (!select) {
-            return;
-        }
-
-        select.innerHTML = "";
-
-        select.appendChild(
-            createElement(
-                "option",
-                "",
-                "Selecione uma variável"
-            )
-        );
-
-        for (var i = 0; i < tags.length; i++) {
-
-            var option = document.createElement("option");
-
-            option.value = tags[i].id;
-            option.textContent = tags[i].name;
-
-            select.appendChild(option);
-        }
-    }
-
-    function openTrendForTag(tagId) {
-
-        var select = getElement("trendTag");
-
-        if (select) {
-            select.value = tagId;
-        }
-
-        showPage("trends");
-
-        var message = getElement("trendMessage");
-
-        if (message) {
-            message.textContent =
-                "Variável selecionada. Aguardando integração com o histórico.";
-        }
-    }
-
-    /* -----------------------------------------------
-       CONFIGURACAO DAS VARIAVEIS
-    ----------------------------------------------- */
-
-    function renderTagSettings() {
-
-        var container = getElement("tagSettings");
-
-        if (!container) {
-            return;
-        }
-
+        lastAlarmSignature = signature;
         container.innerHTML = "";
 
-        for (var i = 0; i < tags.length; i++) {
+        data.forEach(function (alarm) {
+            var item = document.createElement("div");
 
-            var tag = tags[i];
+            item.className = "alarm-item";
 
-            var row = createElement(
-                "div",
-                "setting-row"
-            );
+            var title = document.createElement("strong");
+            title.textContent =
+                alarm.tagName || alarm.tagId || "Alarme";
 
-            var name = createElement(
-                "span",
-                "",
-                tag.name
-            );
+            var description = document.createElement("div");
+            description.textContent =
+                alarm.description || alarm.alarmType || "";
 
-            var limits = createElement(
-                "strong",
-                "",
-                "Referência: " +
-                tag.min + " a " + tag.max +
-                " " + (tag.unit || "")
-            );
+            var state = document.createElement("div");
+            state.textContent = alarm.state || "ACTIVE";
 
-            row.appendChild(name);
-            row.appendChild(limits);
+            item.appendChild(title);
+            item.appendChild(description);
+            item.appendChild(state);
 
-            container.appendChild(row);
-        }
+            container.appendChild(item);
+        });
     }
 
-    /* -----------------------------------------------
-       INICIALIZACAO
-    ----------------------------------------------- */
+    function updateSummary(data) {
+        if (!Array.isArray(data)) return;
 
-    function startApplication() {
+        var good = 0;
+        var unavailable = 0;
 
-        initializeNavigation();
+        data.forEach(function (tag) {
+            if (tag.quality === "Good" &&
+                tag.value !== null &&
+                tag.value !== undefined) {
+                good++;
+            } else {
+                unavailable++;
+            }
+        });
 
-        updateClock();
+        var goodElement = byId("goodTags");
+        var badElement = byId("badTags");
 
-        window.setInterval(updateClock, 1000);
+        if (goodElement) goodElement.textContent = good;
+        if (badElement) badElement.textContent = unavailable;
+    }
 
-        setConnectionStatus(
-            "offline",
-            "AGUARDANDO CONFIGURAÇÃO"
+    function loadTags() {
+        request("/tags", function (error, data) {
+            if (error) {
+                setConnection(false, "API INDISPONÍVEL");
+                return;
+            }
+
+            if (!data) return;
+
+            renderTags(data);
+        });
+    }
+
+    function refresh() {
+        if (busy) return;
+
+        busy = true;
+
+        request("/status", function (error, status) {
+            if (error) {
+                setConnection(false, "SEM COMUNICAÇÃO");
+                busy = false;
+                return;
+            }
+
+            setConnection(true, "BRIDGE CONECTADA");
+
+            request("/tags", function (tagError, tagData) {
+                if (!tagError && tagData) {
+                    updateTagValues(tagData);
+                    updateSummary(tagData);
+                }
+
+                request("/alarms", function (alarmError, alarmData) {
+                    if (!alarmError && alarmData) {
+                        renderAlarms(alarmData);
+                    }
+
+                    busy = false;
+                });
+            });
+        });
+    }
+
+    function initializeNavigation() {
+        var buttons = document.querySelectorAll(
+            "[data-section]"
         );
 
-        loadConfiguration();
+        buttons.forEach(function (button) {
+            button.addEventListener("click", function () {
+                var section = button.getAttribute(
+                    "data-section"
+                );
+
+                document.querySelectorAll(".page-section")
+                    .forEach(function (page) {
+                        page.style.display = "none";
+                    });
+
+                var target = byId(section);
+
+                if (target) {
+                    target.style.display = "block";
+                }
+            });
+        });
+    }
+
+    function initialize() {
+        updateClock();
+        initializeNavigation();
+        loadTags();
+        refresh();
+
+        window.setInterval(updateClock, 1000);
+        window.setInterval(refresh, REFRESH_INTERVAL);
     }
 
     if (document.readyState === "loading") {
-
         document.addEventListener(
             "DOMContentLoaded",
-            startApplication
+            initialize
         );
-
     } else {
-
-        startApplication();
+        initialize();
     }
 
 })();

@@ -1,310 +1,257 @@
 
 using System;
 using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.Globalization;
 using System.Web.Script.Serialization;
 
 namespace SupervisorioECA.Bridge.Api
 {
-    public class ApiController
+    public sealed class ApiController
     {
         private readonly ApiDataService dataService;
-
-        private readonly JavaScriptSerializer serializer =
-            new JavaScriptSerializer();
+        private readonly EventHistoryApiService eventHistoryService;
+        private readonly JavaScriptSerializer serializer;
 
         public ApiController(ApiDataService dataService)
+            : this(dataService, null)
+        {
+        }
+
+        public ApiController(
+            ApiDataService dataService,
+            EventHistoryApiService eventHistoryService)
         {
             if (dataService == null)
                 throw new ArgumentNullException("dataService");
 
             this.dataService = dataService;
+            this.eventHistoryService = eventHistoryService;
+
+            serializer = new JavaScriptSerializer();
+            serializer.MaxJsonLength = Int32.MaxValue;
         }
 
         public string Handle(
             string method,
             string path,
-            string query,
+            NameValueCollection query,
             string body)
         {
             try
             {
-                object data = Route(
-                    method,
-                    path,
-                    query,
-                    body
-                );
+                if (String.IsNullOrEmpty(method))
+                    return SerializeError("Método HTTP não informado.");
 
-                return Serialize(ApiResponse.Ok(data));
-            }
-            catch (ArgumentException ex)
-            {
-                return Serialize(ApiResponse.Error(ex.Message));
+                object result;
+
+                if (String.Equals(
+                    method,
+                    "GET",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    result = HandleGet(path, query);
+                }
+                else if (String.Equals(
+                    method,
+                    "POST",
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    result = HandlePost(path, body);
+                }
+                else
+                {
+                    return SerializeError("Método não permitido.");
+                }
+
+                return serializer.Serialize(
+                    new ApiResponse
+                    {
+                        Success = true,
+                        Message = "OK",
+                        Data = result
+                    });
             }
             catch (Exception ex)
             {
-                return Serialize(
-                    ApiResponse.Error(
-                        "Erro interno ao processar requisicao."
-                    )
-                );
+                return SerializeError(ex.Message);
             }
         }
 
-        private object Route(
-            string method,
+        private object HandleGet(
             string path,
-            string query,
-            string body)
+            NameValueCollection query)
         {
-            method = (method ?? "").ToUpperInvariant();
-            path = (path ?? "").TrimEnd('/');
-
-            Dictionary<string, string> parameters =
-                ParseQuery(query);
-
-            if (method == "GET" && path == "/api/status")
+            if (path == "/api/status")
                 return dataService.GetStatus();
 
-            if (method == "GET" && path == "/api/tags")
+            if (path == "/api/tags")
                 return dataService.GetTags();
 
-            if (method == "GET" && path == "/api/alarms")
+            if (path == "/api/alarms")
                 return dataService.GetActiveAlarms();
 
-            if (method == "GET" && path == "/api/events")
+            if (path == "/api/events")
             {
-                DateTime start = GetDate(
-                    parameters,
-                    "start",
-                    DateTime.Now.Date
-                );
+                if (eventHistoryService != null)
+                {
+                    string start = query != null
+                        ? query["start"]
+                        : null;
 
-                DateTime end = GetDate(
-                    parameters,
-                    "end",
-                    DateTime.Now
-                );
+                    string end = query != null
+                        ? query["end"]
+                        : null;
 
-                string tagId = GetParameter(
-                    parameters, "tagId", ""
-                );
+                    string tagId = query != null
+                        ? query["tagId"]
+                        : null;
 
-                int limit = GetInteger(
-                    parameters, "limit", 500
-                );
+                    int maxResults = 500;
 
-                if (limit < 1 || limit > 5000)
-                    throw new ArgumentException(
-                        "Limite de consulta invalido."
-                    );
+                    if (query != null &&
+                        !String.IsNullOrEmpty(query["limit"]))
+                    {
+                        if (!Int32.TryParse(
+                            query["limit"],
+                            NumberStyles.Integer,
+                            CultureInfo.InvariantCulture,
+                            out maxResults))
+                        {
+                            maxResults = 500;
+                        }
+                    }
 
-                return dataService.GetEvents(
-                    start,
-                    end,
-                    tagId,
-                    limit
-                );
+                    if (maxResults <= 0)
+                        maxResults = 500;
+
+                    return eventHistoryService.GetEvents(
+                        start,
+                        end,
+                        tagId,
+                        maxResults);
+                }
+
+                return dataService.GetEvents();
             }
 
-            if (method == "GET" && path == "/api/trends")
+            if (path == "/api/trends")
             {
-                string tagId = GetParameter(
-                    parameters, "tagId", ""
-                );
+                string tagId = query != null
+                    ? query["tagId"]
+                    : null;
 
-                if (String.IsNullOrEmpty(tagId))
-                    throw new ArgumentException(
-                        "Informe a variavel da tendencia."
-                    );
+                string start = query != null
+                    ? query["start"]
+                    : null;
 
-                DateTime start = GetDate(
-                    parameters,
-                    "start",
-                    DateTime.Now.AddHours(-1)
-                );
-
-                DateTime end = GetDate(
-                    parameters,
-                    "end",
-                    DateTime.Now
-                );
-
-                if (end < start)
-                    throw new ArgumentException(
-                        "Periodo de consulta invalido."
-                    );
+                string end = query != null
+                    ? query["end"]
+                    : null;
 
                 return dataService.GetTrend(
                     tagId,
                     start,
-                    end
-                );
+                    end);
             }
 
-            if (method == "POST" &&
-                path == "/api/alarms/acknowledge")
+            throw new InvalidOperationException(
+                "Rota GET não encontrada.");
+        }
+
+        private object HandlePost(
+            string path,
+            string body)
+        {
+            if (path == "/api/alarms/acknowledge")
             {
                 Dictionary<string, object> request =
-                    serializer.Deserialize<
-                        Dictionary<string, object>
-                    >(body ?? "{}");
-
-                string alarmId = GetBodyString(
-                    request, "alarmId"
-                );
-
-                string user = GetBodyString(
-                    request, "user"
-                );
-
-                if (String.IsNullOrEmpty(alarmId))
-                    throw new ArgumentException(
-                        "Identificador do alarme nao informado."
+                    serializer.Deserialize<Dictionary<string, object>>(
+                        String.IsNullOrEmpty(body) ? "{}" : body
                     );
+
+                if (request == null)
+                    throw new ArgumentException(
+                        "Corpo da requisicao invalido.");
+
+                object idObject;
+                object userObject;
+
+                string idText = null;
+                string user = "OPERADOR";
+
+                if (request.TryGetValue("id", out idObject) &&
+                    idObject != null)
+                {
+                    idText = Convert.ToString(
+                        idObject,
+                        CultureInfo.InvariantCulture
+                    );
+                }
+
+                if (request.TryGetValue("user", out userObject) &&
+                    userObject != null)
+                {
+                    user = Convert.ToString(
+                        userObject,
+                        CultureInfo.InvariantCulture
+                    );
+                }
+
+                long occurrenceId;
+
+                if (String.IsNullOrEmpty(idText) ||
+                    !Int64.TryParse(
+                        idText,
+                        NumberStyles.Integer,
+                        CultureInfo.InvariantCulture,
+                        out occurrenceId) ||
+                    occurrenceId <= 0)
+                {
+                    throw new ArgumentException(
+                        "Identificador do alarme invalido.");
+                }
+
+                if (String.IsNullOrEmpty(user))
+                    user = "OPERADOR";
+
+                string normalizedId = occurrenceId.ToString(
+                    CultureInfo.InvariantCulture
+                );
 
                 bool acknowledged =
                     dataService.AcknowledgeAlarm(
-                        alarmId,
+                        normalizedId,
                         user
                     );
 
                 if (!acknowledged)
-                    throw new ArgumentException(
-                        "Alarme nao encontrado ou ja reconhecido."
+                    throw new InvalidOperationException(
+                        "Não foi possível reconhecer o alarme."
                     );
 
-                return new Dictionary<string, object>
+                return new
                 {
-                    { "acknowledged", true }
+                    acknowledged = true,
+                    id = normalizedId,
+                    user = user
                 };
             }
 
-            if (method == "POST")
-                throw new ArgumentException(
-                    "Operacao de escrita nao autorizada."
-                );
-
-            throw new ArgumentException(
-                "Rota ou metodo nao encontrado."
+            throw new InvalidOperationException(
+                "Rota POST não encontrada."
             );
         }
 
-        private Dictionary<string, string> ParseQuery(
-            string query)
+        private string SerializeError(string message)
         {
-            Dictionary<string, string> result =
-                new Dictionary<string, string>(
-                    StringComparer.OrdinalIgnoreCase
-                );
-
-            if (String.IsNullOrEmpty(query))
-                return result;
-
-            string[] parts = query.TrimStart('?').Split('&');
-
-            foreach (string part in parts)
-            {
-                if (String.IsNullOrEmpty(part))
-                    continue;
-
-                string[] pair = part.Split(
-                    new char[] { '=' }, 2
-                );
-
-                string key = Uri.UnescapeDataString(
-                    pair[0].Replace("+", " ")
-                );
-
-                string value = pair.Length > 1
-                    ? Uri.UnescapeDataString(
-                        pair[1].Replace("+", " ")
-                    )
-                    : "";
-
-                result[key] = value;
-            }
-
-            return result;
-        }
-
-        private string GetParameter(
-            Dictionary<string, string> parameters,
-            string key,
-            string defaultValue)
-        {
-            string value;
-
-            return parameters.TryGetValue(key, out value)
-                ? value
-                : defaultValue;
-        }
-
-        private DateTime GetDate(
-            Dictionary<string, string> parameters,
-            string key,
-            DateTime defaultValue)
-        {
-            string value;
-
-            if (!parameters.TryGetValue(key, out value) ||
-                String.IsNullOrEmpty(value))
-                return defaultValue;
-
-            DateTime parsed;
-
-            if (!DateTime.TryParse(
-                value,
-                CultureInfo.InvariantCulture,
-                DateTimeStyles.RoundtripKind,
-                out parsed))
-            {
-                throw new ArgumentException(
-                    "Data invalida no parametro: " + key
-                );
-            }
-
-            return parsed;
-        }
-
-        private int GetInteger(
-            Dictionary<string, string> parameters,
-            string key,
-            int defaultValue)
-        {
-            string value;
-
-            if (!parameters.TryGetValue(key, out value))
-                return defaultValue;
-
-            int parsed;
-
-            if (!Int32.TryParse(value, out parsed))
-                throw new ArgumentException(
-                    "Numero invalido no parametro: " + key
-                );
-
-            return parsed;
-        }
-
-        private string GetBodyString(
-            Dictionary<string, object> request,
-            string key)
-        {
-            object value;
-
-            if (request == null ||
-                !request.TryGetValue(key, out value) ||
-                value == null)
-                return "";
-
-            return Convert.ToString(value);
-        }
-
-        private string Serialize(ApiResponse response)
-        {
-            return serializer.Serialize(response);
+            return serializer.Serialize(
+                new ApiResponse
+                {
+                    Success = false,
+                    Message = message,
+                    Data = null
+                });
         }
     }
 }

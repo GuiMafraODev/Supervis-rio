@@ -3,6 +3,7 @@ using System;
 using System.IO;
 using System.Net;
 using System.Text;
+using System.Web;
 
 namespace SupervisorioECA.Bridge.Api
 {
@@ -40,10 +41,15 @@ namespace SupervisorioECA.Bridge.Api
                     context.Request
                 );
 
+                System.Collections.Specialized.NameValueCollection query =
+                    HttpUtility.ParseQueryString(
+                        context.Request.Url.Query
+                    );
+
                 string response = controller.Handle(
                     method,
                     path,
-                    context.Request.Url.Query,
+                    query,
                     body
                 );
 
@@ -55,7 +61,7 @@ namespace SupervisorioECA.Bridge.Api
 
                 return true;
             }
-            catch (Exception ex)
+            catch (Exception)
             {
                 string message =
                     "Falha ao processar requisicao da API.";

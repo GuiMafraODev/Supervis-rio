@@ -23,11 +23,10 @@ namespace SupervisorioECA.Bridge
         public TrendStore TrendStore { get; private set; }
         public TrendAcquisitionService TrendAcquisition { get; private set; }
 
-        public AlarmRepository AlarmRepository { get; private set; }
-        public AlarmEventStore AlarmEventStore { get; private set; }
         public AlarmService AlarmService { get; private set; }
 
         public EventHistoryService EventHistory { get; private set; }
+        public EventHistoryApiService EventHistoryApi { get; private set; }
         public BridgeEventCoordinator EventCoordinator { get; private set; }
 
         public RetentionService Retention { get; private set; }
@@ -106,23 +105,29 @@ namespace SupervisorioECA.Bridge
                 5000
             );
 
-            AlarmRepository = new AlarmRepository(
-                Path.Combine(config, "alarms.json")
-            );
-
-            AlarmEventStore = new AlarmEventStore(events);
-
+            // Serviço de alarmes.
+            // O próprio AlarmService cria seu repositório
+            // de definições e seu armazenamento de eventos.
             AlarmService = new AlarmService(
                 Tags,
-                AlarmRepository,
-                AlarmEventStore
+                Path.Combine(config, "alarms.json"),
+                events
             );
 
+            // Histórico unificado.
             EventHistory = new EventHistoryService(events);
 
             EventCoordinator = new BridgeEventCoordinator(
                 EventHistory,
                 Logger
+            );
+
+            // Conecta os eventos de alarme ao histórico unificado.
+            AlarmService.AlarmEventRecorded +=
+                EventCoordinator.RegisterAlarm;
+
+            EventHistoryApi = new EventHistoryApiService(
+                EventHistory
             );
 
             AlarmBinding = new AlarmAcquisitionBinding(
@@ -156,7 +161,10 @@ namespace SupervisorioECA.Bridge
                 delegate { return OpcClient.ServerName; }
             );
 
-            ApiController = new ApiController(ApiData);
+            ApiController = new ApiController(
+                ApiData,
+                EventHistoryApi
+            );
 
             ApiHandler = new ApiRequestHandler(
                 ApiController

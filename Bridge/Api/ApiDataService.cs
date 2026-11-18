@@ -1,6 +1,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using SupervisorioECA.Bridge.Opc;
 using SupervisorioECA.Bridge.Communication;
 using SupervisorioECA.Bridge.Alarms;
@@ -26,7 +27,16 @@ namespace SupervisorioECA.Bridge.Api
             Func<bool> opcConnected,
             Func<string> opcServerName)
         {
-            this.tags = tags;
+            if (acquisition == null)
+                throw new ArgumentNullException("acquisition");
+
+            if (alarms == null)
+                throw new ArgumentNullException("alarms");
+
+            if (trends == null)
+                throw new ArgumentNullException("trends");
+
+            this.tags = tags ?? new List<OpcTagDefinition>();
             this.acquisition = acquisition;
             this.alarms = alarms;
             this.trends = trends;
@@ -77,10 +87,16 @@ namespace SupervisorioECA.Bridge.Api
                 item.Name = definition.Name;
                 item.Unit = definition.Unit;
 
-                OpcValue value;
+                OpcValue value = null;
 
-                if (latest.TryGetValue(
-                    definition.TagId, out value) &&
+                bool hasValue =
+                    latest != null &&
+                    latest.TryGetValue(
+                        definition.TagId,
+                        out value
+                    );
+
+                if (hasValue &&
                     value != null &&
                     value.IsGood())
                 {
@@ -93,6 +109,7 @@ namespace SupervisorioECA.Bridge.Api
                 else
                 {
                     item.Value = null;
+
                     item.Quality = value != null
                         ? value.Quality
                         : "Bad";
@@ -103,7 +120,8 @@ namespace SupervisorioECA.Bridge.Api
 
                     item.Available = false;
 
-                    item.Error = value != null
+                    item.Error = value != null &&
+                                 !String.IsNullOrEmpty(value.ErrorMessage)
                         ? value.ErrorMessage
                         : "Aguardando primeira leitura OPC.";
                 }
@@ -122,8 +140,14 @@ namespace SupervisorioECA.Bridge.Api
             IList<AlarmOccurrence> active =
                 alarms.GetActiveAlarms();
 
+            if (active == null)
+                return result;
+
             foreach (AlarmOccurrence occurrence in active)
             {
+                if (occurrence == null)
+                    continue;
+
                 ApiAlarm item = new ApiAlarm();
 
                 item.Id = occurrence.Id;
@@ -158,6 +182,14 @@ namespace SupervisorioECA.Bridge.Api
             IList<ApiEvent> result =
                 new List<ApiEvent>();
 
+            if (end < start)
+                throw new ArgumentException(
+                    "A data final nao pode ser anterior a data inicial."
+                );
+
+            if (maxResults <= 0)
+                maxResults = 500;
+
             IList<AlarmEvent> events =
                 alarms.GetEvents(
                     start,
@@ -166,8 +198,14 @@ namespace SupervisorioECA.Bridge.Api
                     maxResults
                 );
 
+            if (events == null)
+                return result;
+
             foreach (AlarmEvent alarmEvent in events)
             {
+                if (alarmEvent == null)
+                    continue;
+
                 ApiEvent item = new ApiEvent();
 
                 item.Id = alarmEvent.Id;
@@ -191,6 +229,22 @@ namespace SupervisorioECA.Bridge.Api
             return result;
         }
 
+        // Compatibilidade com a rota /api/events
+        // quando o EventHistoryApiService nao estiver configurado.
+        // Nesse caso, retorna os eventos das ultimas 24 horas.
+        public IList<ApiEvent> GetEvents()
+        {
+            DateTime end = DateTime.Now;
+            DateTime start = end.AddHours(-24);
+
+            return GetEvents(
+                start,
+                end,
+                null,
+                500
+            );
+        }
+
         public IList<ApiTrendPoint> GetTrend(
             string tagId,
             DateTime start,
@@ -199,12 +253,25 @@ namespace SupervisorioECA.Bridge.Api
             IList<ApiTrendPoint> result =
                 new List<ApiTrendPoint>();
 
+            if (String.IsNullOrEmpty(tagId))
+                throw new ArgumentException(
+                    "Identificador da tag nao informado."
+                );
+
+            if (end < start)
+                throw new ArgumentException(
+                    "A data final nao pode ser anterior a data inicial."
+                );
+
             IList<TrendSample> samples =
                 trends.Query(tagId, start, end);
 
+            if (samples == null)
+                return result;
+
             foreach (TrendSample sample in samples)
             {
-                if (!sample.IsValid)
+                if (sample == null || !sample.IsValid)
                     continue;
 
                 ApiTrendPoint point = new ApiTrendPoint();
@@ -219,10 +286,82 @@ namespace SupervisorioECA.Bridge.Api
             return result;
         }
 
+        // Sobrecarga utilizada pelo ApiController,
+        // que recebe datas como texto pela URL.
+        public IList<ApiTrendPoint> GetTrend(
+            string tagId,
+            string start,
+            string end)
+        {
+            DateTime startDate;
+            DateTime endDate;
+
+            ParseDateRange(
+                start,
+                end,
+                out startDate,
+                out endDate
+            );
+
+            return GetTrend(
+                tagId,
+                startDate,
+                endDate
+            );
+        }
+
+        private void ParseDateRange(
+            string start,
+            string end,
+            out DateTime startDate,
+            out DateTime endDate)
+        {
+            DateTime now = DateTime.Now;
+
+            startDate = now.AddHours(-24);
+            endDate = now;
+
+            if (!String.IsNullOrEmpty(start))
+            {
+                if (!DateTime.TryParse(
+                    start,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind,
+                    out startDate))
+                {
+                    throw new ArgumentException(
+                        "Data inicial invalida."
+                    );
+                }
+            }
+
+            if (!String.IsNullOrEmpty(end))
+            {
+                if (!DateTime.TryParse(
+                    end,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind,
+                    out endDate))
+                {
+                    throw new ArgumentException(
+                        "Data final invalida."
+                    );
+                }
+            }
+
+            if (endDate < startDate)
+                throw new ArgumentException(
+                    "A data final nao pode ser anterior a data inicial."
+                );
+        }
+
         public bool AcknowledgeAlarm(
             string alarmId,
             string user)
         {
+            if (String.IsNullOrEmpty(alarmId))
+                return false;
+
             return alarms.Acknowledge(
                 alarmId,
                 user

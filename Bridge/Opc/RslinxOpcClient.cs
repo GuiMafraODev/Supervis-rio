@@ -15,6 +15,8 @@ namespace SupervisorioECA.Bridge.Opc
         private readonly string machineName;
         private readonly IList<OpcTagDefinition> definitions;
 
+        private readonly object syncRoot = new object();
+
         private object server;
         private object groups;
         private object group;
@@ -23,11 +25,21 @@ namespace SupervisorioECA.Bridge.Opc
         private readonly Dictionary<string, object> opcItems =
             new Dictionary<string, object>();
 
+        private readonly Dictionary<string, string> failedItems =
+            new Dictionary<string, string>();
+
         private bool connected;
+        private bool disposed;
 
         public bool IsConnected
         {
-            get { return connected; }
+            get
+            {
+                lock (syncRoot)
+                {
+                    return connected;
+                }
+            }
         }
 
         public string ServerName
@@ -43,7 +55,9 @@ namespace SupervisorioECA.Bridge.Opc
             IList<OpcTagDefinition> definitions)
         {
             if (String.IsNullOrEmpty(serverName))
-                throw new ArgumentException("Servidor OPC nao informado.");
+                throw new ArgumentException(
+                    "Servidor OPC nao informado."
+                );
 
             if (definitions == null)
                 throw new ArgumentNullException("definitions");
@@ -55,97 +69,134 @@ namespace SupervisorioECA.Bridge.Opc
 
         public void Connect()
         {
-            if (connected)
-                return;
+            bool stateChanged = false;
 
-            Type automationType =
-                Type.GetTypeFromProgID(AutomationProgId);
-
-            if (automationType == null)
+            lock (syncRoot)
             {
-                throw new InvalidOperationException(
-                    "OPC Automation nao encontrado. " +
-                    "Verifique a instalacao dos componentes OPC."
-                );
-            }
+                if (disposed)
+                    throw new ObjectDisposedException(
+                        "RslinxOpcClient"
+                    );
 
-            try
-            {
-                server = Activator.CreateInstance(automationType);
+                if (connected)
+                    return;
 
-                Invoke(server, "Connect",
-                    new object[] { serverName, machineName });
-
-                groups = GetProperty(server, "OPCGroups");
-
-                group = Invoke(groups, "Add",
-                    new object[] { "SupervisorioECA" });
-
-                SetProperty(group, "IsActive", true);
-                SetProperty(group, "IsSubscribed", false);
-                SetProperty(group, "UpdateRate", 1000);
-
-                items = GetProperty(group, "OPCItems");
-
-                opcItems.Clear();
-
-                int clientHandle = 1;
-
-                foreach (OpcTagDefinition definition in definitions)
+                try
                 {
-                    if (!definition.Enabled)
-                        continue;
+                    Type automationType =
+                        Type.GetTypeFromProgID(AutomationProgId);
 
-                    string itemId = BuildItemId(definition);
+                    if (automationType == null)
+                    {
+                        throw new InvalidOperationException(
+                            "OPC Automation nao encontrado. " +
+                            "Verifique a instalacao dos componentes OPC."
+                        );
+                    }
 
-                    object opcItem = Invoke(items, "AddItem",
-                        new object[] { itemId, clientHandle });
+                    server = Activator.CreateInstance(
+                        automationType
+                    );
 
-                    opcItems.Add(definition.TagId, opcItem);
+                    Invoke(
+                        server,
+                        "Connect",
+                        new object[] { serverName, machineName }
+                    );
 
-                    clientHandle++;
+                    groups = GetProperty(
+                        server,
+                        "OPCGroups"
+                    );
+
+                    group = Invoke(
+                        groups,
+                        "Add",
+                        new object[] { "SupervisorioECA" }
+                    );
+
+                    SetProperty(group, "IsActive", true);
+                    SetProperty(group, "IsSubscribed", false);
+                    SetProperty(group, "UpdateRate", 1000);
+
+                    items = GetProperty(
+                        group,
+                        "OPCItems"
+                    );
+
+                    opcItems.Clear();
+                    failedItems.Clear();
+
+                    int clientHandle = 1;
+
+                    foreach (OpcTagDefinition definition in definitions)
+                    {
+                        if (definition == null)
+                            continue;
+
+                        if (!definition.Enabled)
+                            continue;
+
+                        if (String.IsNullOrEmpty(definition.TagId))
+                            continue;
+
+                        try
+                        {
+                            string itemId = BuildItemId(definition);
+
+                            object opcItem = Invoke(
+                                items,
+                                "AddItem",
+                                new object[] { itemId, clientHandle }
+                            );
+
+                            if (opcItem == null)
+                            {
+                                throw new InvalidOperationException(
+                                    "RSLinx nao retornou um item OPC valido."
+                                );
+                            }
+
+                            opcItems[definition.TagId] = opcItem;
+                        }
+                        catch (Exception ex)
+                        {
+                            failedItems[definition.TagId] = ex.Message;
+                        }
+
+                        clientHandle++;
+                    }
+
+                    connected = true;
+                    stateChanged = true;
                 }
+                catch
+                {
+                    CleanupConnection();
+                    connected = false;
+                    throw;
+                }
+            }
 
-                connected = true;
+            if (stateChanged)
                 RaiseConnectionStateChanged();
-            }
-            catch
-            {
-                Disconnect();
-                throw;
-            }
         }
 
         public void Disconnect()
         {
-            connected = false;
+            bool stateChanged = false;
 
-            opcItems.Clear();
-
-            ReleaseComObject(items);
-            ReleaseComObject(group);
-            ReleaseComObject(groups);
-
-            items = null;
-            group = null;
-            groups = null;
-
-            if (server != null)
+            lock (syncRoot)
             {
-                try
-                {
-                    Invoke(server, "Disconnect", new object[0]);
-                }
-                catch
-                {
-                    // A desconexao pode ocorrer com o servidor indisponivel.
-                }
+                stateChanged = connected;
+
+                connected = false;
+
+                CleanupConnection();
             }
 
-            ReleaseComObject(server);
-            server = null;
-
-            RaiseConnectionStateChanged();
+            if (stateChanged)
+                RaiseConnectionStateChanged();
         }
 
         public IList<OpcValue> ReadAll()
@@ -154,7 +205,7 @@ namespace SupervisorioECA.Bridge.Opc
 
             foreach (OpcTagDefinition definition in definitions)
             {
-                if (!definition.Enabled)
+                if (definition == null || !definition.Enabled)
                     continue;
 
                 result.Add(Read(definition.TagId));
@@ -165,103 +216,153 @@ namespace SupervisorioECA.Bridge.Opc
 
         public OpcValue Read(string tagId)
         {
-            if (!connected)
+            lock (syncRoot)
             {
-                return OpcValue.CreateBad(
-                    tagId,
-                    "Bad",
-                    "Cliente OPC desconectado."
-                );
-            }
-
-            object opcItem;
-
-            if (!opcItems.TryGetValue(tagId, out opcItem))
-            {
-                return OpcValue.CreateBad(
-                    tagId,
-                    "Bad",
-                    "Tag nao encontrada no grupo OPC."
-                );
-            }
-
-            try
-            {
-                object[] arguments = new object[]
-                {
-                    1,
-                    null,
-                    null,
-                    null
-                };
-
-                Invoke(opcItem, "Read", arguments);
-
-                object rawValue = arguments[1];
-                object rawQuality = arguments[2];
-                object rawTimestamp = arguments[3];
-
-                if (rawValue == null || rawQuality == null)
+                if (!connected)
                 {
                     return OpcValue.CreateBad(
                         tagId,
                         "Bad",
-                        "Servidor OPC retornou dados incompletos."
+                        "Cliente OPC desconectado."
                     );
                 }
 
-                int quality = Convert.ToInt32(
-                    rawQuality, CultureInfo.InvariantCulture
-                );
-
-                string qualityText = GetQualityName(quality);
-
-                if (qualityText != "Good")
+                if (String.IsNullOrEmpty(tagId))
                 {
                     return OpcValue.CreateBad(
                         tagId,
-                        qualityText,
-                        "Qualidade OPC nao permite utilizar a leitura."
+                        "Bad",
+                        "Identificador da tag nao informado."
                     );
                 }
 
-                double value = Convert.ToDouble(
-                    rawValue, CultureInfo.InvariantCulture
-                );
+                object opcItem;
 
-                DateTime timestamp = DateTime.Now;
-
-                if (rawTimestamp != null)
+                if (!opcItems.TryGetValue(tagId, out opcItem))
                 {
-                    timestamp = Convert.ToDateTime(
-                        rawTimestamp, CultureInfo.InvariantCulture
+                    string error;
+
+                    if (failedItems.TryGetValue(tagId, out error))
+                    {
+                        return OpcValue.CreateBad(
+                            tagId,
+                            "Bad",
+                            "Falha ao adicionar item OPC: " + error
+                        );
+                    }
+
+                    return OpcValue.CreateBad(
+                        tagId,
+                        "Bad",
+                        "Tag nao encontrada no grupo OPC."
                     );
                 }
 
-                return OpcValue.CreateGood(
-                    tagId,
-                    value,
-                    timestamp
-                );
-            }
-            catch (Exception ex)
-            {
-                return OpcValue.CreateBad(
-                    tagId,
-                    "Bad",
-                    ex.Message
-                );
+                try
+                {
+                    object[] arguments = new object[]
+                    {
+                        1,
+                        null,
+                        null,
+                        null
+                    };
+
+                    Invoke(
+                        opcItem,
+                        "Read",
+                        arguments
+                    );
+
+                    object rawValue = arguments[1];
+                    object rawQuality = arguments[2];
+                    object rawTimestamp = arguments[3];
+
+                    if (rawValue == null || rawQuality == null)
+                    {
+                        return OpcValue.CreateBad(
+                            tagId,
+                            "Bad",
+                            "Servidor OPC retornou dados incompletos."
+                        );
+                    }
+
+                    int quality = Convert.ToInt32(
+                        rawQuality,
+                        CultureInfo.InvariantCulture
+                    );
+
+                    string qualityText = GetQualityName(quality);
+
+                    if (qualityText != "Good")
+                    {
+                        return OpcValue.CreateBad(
+                            tagId,
+                            qualityText,
+                            "Qualidade OPC nao permite utilizar a leitura."
+                            true
+                        );
+                    }
+
+                    double value = Convert.ToDouble(
+                        rawValue,
+                        CultureInfo.InvariantCulture
+                    );
+
+                    DateTime timestamp = DateTime.Now;
+
+                    if (rawTimestamp != null)
+                    {
+                        timestamp = Convert.ToDateTime(
+                            rawTimestamp,
+                            CultureInfo.InvariantCulture
+                        );
+                    }
+
+                    return OpcValue.CreateGood(
+                        tagId,
+                        value,
+                        timestamp
+                    );
+                }
+                catch (Exception ex)
+                {
+                    return OpcValue.CreateBad(
+                        tagId,
+                        "Bad",
+                        "Erro na leitura OPC: " + ex.Message
+                    );
+                }
             }
         }
 
         private string BuildItemId(OpcTagDefinition definition)
         {
+            if (definition == null)
+                throw new ArgumentNullException("definition");
+
+            if (String.IsNullOrEmpty(definition.ItemId))
+            {
+                throw new InvalidOperationException(
+                    "ItemId nao informado para a tag " +
+                    definition.TagId
+                );
+            }
+
             string itemId = definition.ItemId.Trim();
 
             if (itemId.StartsWith("["))
                 return itemId;
 
-            return "[" + definition.Topic + "]" + itemId;
+            if (String.IsNullOrEmpty(definition.Topic))
+            {
+                throw new InvalidOperationException(
+                    "Topic nao informado para a tag " +
+                    definition.TagId
+                );
+            }
+
+            return "[" + definition.Topic.Trim() + "]" + itemId;
         }
 
         private static string GetQualityName(int quality)
@@ -281,6 +382,11 @@ namespace SupervisorioECA.Bridge.Opc
             object target,
             string propertyName)
         {
+            if (target == null)
+                throw new InvalidOperationException(
+                    "Objeto COM nulo ao acessar " + propertyName
+                );
+
             return target.GetType().InvokeMember(
                 propertyName,
                 BindingFlags.GetProperty,
@@ -295,6 +401,11 @@ namespace SupervisorioECA.Bridge.Opc
             string propertyName,
             object value)
         {
+            if (target == null)
+                throw new InvalidOperationException(
+                    "Objeto COM nulo ao configurar " + propertyName
+                );
+
             target.GetType().InvokeMember(
                 propertyName,
                 BindingFlags.SetProperty,
@@ -309,6 +420,11 @@ namespace SupervisorioECA.Bridge.Opc
             string methodName,
             object[] arguments)
         {
+            if (target == null)
+                throw new InvalidOperationException(
+                    "Objeto COM nulo ao executar " + methodName
+                );
+
             return target.GetType().InvokeMember(
                 methodName,
                 BindingFlags.InvokeMethod,
@@ -316,6 +432,43 @@ namespace SupervisorioECA.Bridge.Opc
                 target,
                 arguments
             );
+        }
+
+        private void CleanupConnection()
+        {
+            foreach (object opcItem in opcItems.Values)
+                ReleaseComObject(opcItem);
+
+            opcItems.Clear();
+            failedItems.Clear();
+
+            ReleaseComObject(items);
+            items = null;
+
+            ReleaseComObject(group);
+            group = null;
+
+            ReleaseComObject(groups);
+            groups = null;
+
+            if (server != null)
+            {
+                try
+                {
+                    Invoke(
+                        server,
+                        "Disconnect",
+                        new object[0]
+                    );
+                }
+                catch
+                {
+                    // O servidor pode estar indisponivel.
+                }
+            }
+
+            ReleaseComObject(server);
+            server = null;
         }
 
         private static void ReleaseComObject(object value)
@@ -328,7 +481,7 @@ namespace SupervisorioECA.Bridge.Opc
                 }
                 catch
                 {
-                    // Evita interromper o encerramento por falha COM.
+                    // Evita interromper o encerramento.
                 }
             }
         }
@@ -337,12 +490,34 @@ namespace SupervisorioECA.Bridge.Opc
         {
             EventHandler handler = ConnectionStateChanged;
 
-            if (handler != null)
+            if (handler == null)
+                return;
+
+            try
+            {
                 handler(this, EventArgs.Empty);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(
+                    DateTime.Now.ToString(
+                        "yyyy-MM-dd HH:mm:ss"
+                    ) +
+                    " - Erro no evento OPC: " + ex.Message
+                );
+            }
         }
 
         public void Dispose()
         {
+            lock (syncRoot)
+            {
+                if (disposed)
+                    return;
+
+                disposed = true;
+            }
+
             Disconnect();
         }
     }

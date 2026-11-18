@@ -26,24 +26,16 @@ namespace SupervisorioECA.Bridge.Communication
             BridgeLogger logger)
         {
             if (connectionManager == null)
-                throw new ArgumentNullException(
-                    "connectionManager"
-                );
+                throw new ArgumentNullException("connectionManager");
 
             if (acquisitionService == null)
-                throw new ArgumentNullException(
-                    "acquisitionService"
-                );
+                throw new ArgumentNullException("acquisitionService");
 
             if (trendService == null)
-                throw new ArgumentNullException(
-                    "trendService"
-                );
+                throw new ArgumentNullException("trendService");
 
             if (alarmBinding == null)
-                throw new ArgumentNullException(
-                    "alarmBinding"
-                );
+                throw new ArgumentNullException("alarmBinding");
 
             this.connectionManager = connectionManager;
             this.acquisitionService = acquisitionService;
@@ -53,28 +45,40 @@ namespace SupervisorioECA.Bridge.Communication
             this.logger = logger;
         }
 
+        public bool IsStarted
+        {
+            get
+            {
+                lock (syncRoot)
+                {
+                    return started;
+                }
+            }
+        }
+
         public void Start()
         {
             lock (syncRoot)
             {
                 if (disposed)
+                {
                     throw new ObjectDisposedException(
                         "BridgeRuntime"
                     );
+                }
 
                 if (started)
                     return;
 
                 try
                 {
-                    if (logger != null)
-                        logger.Info(
-                            "Inicializando Supervisório ECA."
-                        );
+                    LogInfo(
+                        "Inicializando Supervisorio ECA."
+                    );
 
                     ExecuteRetention();
 
-                    // Primeiro prepara a integracao dos alarmes.
+                    // Prepara primeiro a integracao dos alarmes.
                     alarmBinding.Start();
 
                     // Inicia as tentativas de conexao OPC.
@@ -88,20 +92,20 @@ namespace SupervisorioECA.Bridge.Communication
 
                     started = true;
 
-                    if (logger != null)
-                        logger.Info(
-                            "Servicos do Supervisório ECA iniciados."
-                        );
+                    LogInfo(
+                        "Servicos do Supervisorio ECA iniciados."
+                    );
                 }
                 catch (Exception ex)
                 {
+                    started = false;
+
                     StopServices();
 
-                    if (logger != null)
-                        logger.Error(
-                            "Falha durante a inicializacao da bridge.",
-                            ex
-                        );
+                    LogError(
+                        "Falha durante a inicializacao da bridge.",
+                        ex
+                    );
 
                     throw;
                 }
@@ -112,17 +116,17 @@ namespace SupervisorioECA.Bridge.Communication
         {
             lock (syncRoot)
             {
-                if (!started)
+                if (disposed || !started)
                     return;
+
+                // Atualiza o estado antes de iniciar o encerramento.
+                started = false;
 
                 StopServices();
 
-                started = false;
-
-                if (logger != null)
-                    logger.Info(
-                        "Supervisório ECA encerrado."
-                    );
+                LogInfo(
+                    "Supervisorio ECA encerrado."
+                );
             }
         }
 
@@ -136,19 +140,28 @@ namespace SupervisorioECA.Bridge.Communication
                 RetentionResult result =
                     retentionService.Execute();
 
-                if (logger != null)
+                if (result == null)
                 {
-                    logger.Info(
-                        "Retencao executada. Arquivos removidos: " +
-                        result.DeletedFiles +
-                        ". Arquivos ignorados: " +
-                        result.SkippedFiles +
-                        "."
+                    LogWarning(
+                        "Retencao nao retornou resultado."
                     );
 
+                    return;
+                }
+
+                LogInfo(
+                    "Retencao executada. Arquivos removidos: " +
+                    result.DeletedFiles +
+                    ". Arquivos ignorados: " +
+                    result.SkippedFiles +
+                    "."
+                );
+
+                if (result.Errors != null)
+                {
                     foreach (string error in result.Errors)
                     {
-                        logger.Warning(
+                        LogWarning(
                             "Erro na retencao: " + error
                         );
                     }
@@ -156,57 +169,67 @@ namespace SupervisorioECA.Bridge.Communication
             }
             catch (Exception ex)
             {
-                if (logger != null)
-                    logger.Error(
-                        "Falha ao executar a retencao.",
-                        ex
-                    );
+                LogError(
+                    "Falha ao executar a retencao.",
+                    ex
+                );
 
-                // Falha na limpeza nao deve impedir
-                // a inicializacao da comunicacao.
+                // A falha de retencao nao impede a comunicacao OPC.
             }
         }
 
         private void StopServices()
         {
-            // Para primeiro a gravacao historica.
+            // 1. Interrompe primeiro a gravacao historica.
             try
             {
                 trendService.Stop();
             }
             catch (Exception ex)
             {
-                LogStopError("TrendAcquisitionService", ex);
+                LogStopError(
+                    "TrendAcquisitionService",
+                    ex
+                );
             }
 
-            // Impede novas avaliacoes de alarmes.
+            // 2. Impede novas avaliacoes de alarmes.
             try
             {
                 alarmBinding.Stop();
             }
             catch (Exception ex)
             {
-                LogStopError("AlarmAcquisitionBinding", ex);
+                LogStopError(
+                    "AlarmAcquisitionBinding",
+                    ex
+                );
             }
 
-            // Interrompe a leitura das variaveis.
+            // 3. Aguarda e interrompe a aquisicao OPC.
             try
             {
                 acquisitionService.Stop();
             }
             catch (Exception ex)
             {
-                LogStopError("OpcAcquisitionService", ex);
+                LogStopError(
+                    "OpcAcquisitionService",
+                    ex
+                );
             }
 
-            // Por ultimo, encerra a conexao OPC.
+            // 4. Desconecta o RSLinx por ultimo.
             try
             {
                 connectionManager.Stop();
             }
             catch (Exception ex)
             {
-                LogStopError("OpcConnectionManager", ex);
+                LogStopError(
+                    "OpcConnectionManager",
+                    ex
+                );
             }
         }
 
@@ -214,11 +237,57 @@ namespace SupervisorioECA.Bridge.Communication
             string service,
             Exception exception)
         {
-            if (logger != null)
-                logger.Error(
-                    "Erro ao encerrar " + service + ".",
-                    exception
-                );
+            LogError(
+                "Erro ao encerrar " + service + ".",
+                exception
+            );
+        }
+
+        private void LogInfo(string message)
+        {
+            if (logger == null)
+                return;
+
+            try
+            {
+                logger.Info(message);
+            }
+            catch
+            {
+                // Falhas de log nao devem interromper o runtime.
+            }
+        }
+
+        private void LogWarning(string message)
+        {
+            if (logger == null)
+                return;
+
+            try
+            {
+                logger.Warning(message);
+            }
+            catch
+            {
+                // Falhas de log nao devem interromper o runtime.
+            }
+        }
+
+        private void LogError(
+            string message,
+            Exception exception)
+        {
+            if (logger == null)
+                return;
+
+            try
+            {
+                logger.Error(message, exception);
+            }
+            catch
+            {
+                // Falhas de log nao devem interromper o runtime.
+            }
         }
 
         public void Dispose()
@@ -228,8 +297,14 @@ namespace SupervisorioECA.Bridge.Communication
                 if (disposed)
                     return;
 
+                // Bloqueia novas inicializacoes imediatamente.
+                disposed = true;
+                started = false;
+
+                // Encerra os servicos na ordem correta.
                 StopServices();
 
+                // Libera os recursos na ordem inversa de dependencia.
                 try
                 {
                     trendService.Dispose();
@@ -278,8 +353,9 @@ namespace SupervisorioECA.Bridge.Communication
                     );
                 }
 
-                started = false;
-                disposed = true;
+                LogInfo(
+                    "Recursos do Supervisorio ECA liberados."
+                );
             }
         }
     }

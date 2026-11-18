@@ -74,6 +74,7 @@
     <Compile Include="Storage\RetentionService.cs" />
     <Compile Include="Storage\TrendExportService.cs" />
     <Compile Include="Storage\EventHistoryService.cs" />
+    <Compile Include="Storage\AlarmOccurrenceStore.cs" />
 
     <Compile Include="Alarms\AlarmDefinition.cs" />
     <Compile Include="Alarms\AlarmOccurrence.cs" />
@@ -81,6 +82,7 @@
     <Compile Include="Alarms\AlarmRepository.cs" />
     <Compile Include="Alarms\AlarmEvent.cs" />
     <Compile Include="Alarms\AlarmService.cs" />
+    <Compile Include="Alarms\AlarmOccurrencePersistence.cs" />
 
     <Compile Include="Api\ApiResponse.cs" />
     <Compile Include="Api\ApiDataService.cs" />

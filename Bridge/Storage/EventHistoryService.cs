@@ -18,11 +18,24 @@ namespace SupervisorioECA.Bridge.Storage
         public string Description { get; set; }
         public string Quality { get; set; }
         public bool IsError { get; set; }
+
+        public UnifiedEvent()
+        {
+            Id = String.Empty;
+            Category = String.Empty;
+            EventType = String.Empty;
+            Source = String.Empty;
+            TagId = String.Empty;
+            Description = String.Empty;
+            Quality = String.Empty;
+            Timestamp = DateTime.Now;
+            IsError = false;
+        }
     }
 
     public class EventHistoryService
     {
-        private readonly object syncRoot = new object();
+        private readonly object syncRoot;
         private readonly string folder;
         private readonly JavaScriptSerializer serializer;
 
@@ -30,13 +43,14 @@ namespace SupervisorioECA.Bridge.Storage
         {
             if (String.IsNullOrEmpty(folder))
                 throw new ArgumentException(
-                    "Pasta de eventos nao informada."
-                );
+                    "A pasta do historico nao foi informada.",
+                    "folder");
 
             this.folder = folder;
+            syncRoot = new object();
 
-            if (!Directory.Exists(folder))
-                Directory.CreateDirectory(folder);
+            if (!Directory.Exists(this.folder))
+                Directory.CreateDirectory(this.folder);
 
             serializer = new JavaScriptSerializer();
             serializer.MaxJsonLength = Int32.MaxValue;
@@ -56,7 +70,11 @@ namespace SupervisorioECA.Bridge.Storage
             item.Source = "Sistema de alarmes";
             item.TagId = source.TagId;
             item.Description = source.Description;
-            item.IsError = true;
+
+            // O tipo do evento nao determina sozinho se ele e uma falha.
+            // A classificacao fica neutra ate que a regra seja definida
+            // com base nos tipos reais de eventos do sistema.
+            item.IsError = false;
 
             Add(item);
         }
@@ -69,7 +87,9 @@ namespace SupervisorioECA.Bridge.Storage
 
             UnifiedEvent item = new UnifiedEvent();
 
-            item.Id = source.Id;
+            item.Id = source.Id > 0
+                ? source.Id.ToString(CultureInfo.InvariantCulture)
+                : String.Empty;
             item.Timestamp = source.Timestamp;
             item.Category = "COMMUNICATION";
             item.EventType = source.EventType;
@@ -87,16 +107,37 @@ namespace SupervisorioECA.Bridge.Storage
             if (item == null)
                 return;
 
+            if (item.Timestamp == DateTime.MinValue)
+                item.Timestamp = DateTime.Now;
+
+            if (String.IsNullOrEmpty(item.Id))
+                item.Id = Guid.NewGuid().ToString("N");
+
+            if (String.IsNullOrEmpty(item.Category))
+                item.Category = "SYSTEM";
+
+            if (String.IsNullOrEmpty(item.Source))
+                item.Source = "Sistema";
+
+            if (item.TagId == null)
+                item.TagId = String.Empty;
+
+            if (item.Description == null)
+                item.Description = String.Empty;
+
+            string filePath = GetDailyFile(item.Timestamp);
+
             lock (syncRoot)
             {
-                string file = GetDailyFile(item.Timestamp);
-
                 string json = serializer.Serialize(item);
 
-                File.AppendAllText(
-                    file,
-                    json + Environment.NewLine
-                );
+                using (StreamWriter writer = new StreamWriter(
+                    filePath,
+                    true,
+                    System.Text.Encoding.UTF8))
+                {
+                    writer.WriteLine(json);
+                }
             }
         }
 
@@ -108,90 +149,111 @@ namespace SupervisorioECA.Bridge.Storage
         {
             if (end < start)
                 throw new ArgumentException(
-                    "Periodo de consulta invalido."
-                );
+                    "A data final nao pode ser anterior a data inicial.");
 
             if (maxResults <= 0)
                 maxResults = 1000;
 
-            List<UnifiedEvent> result =
-                new List<UnifiedEvent>();
+            if (maxResults > 2000)
+                maxResults = 2000;
 
-            DateTime day = start.Date;
+            List<UnifiedEvent> results = new List<UnifiedEvent>();
+
+            DateTime firstDay = start.Date;
             DateTime lastDay = end.Date;
 
-            while (day <= lastDay)
+            // Le os arquivos do dia mais recente para o mais antigo.
+            // Assim, quando atingir o limite, evita carregar historico antigo.
+            DateTime day = lastDay;
+
+            while (true)
             {
-                string file = GetDailyFile(day);
+                string filePath = GetDailyFile(day);
 
-                if (File.Exists(file))
-                    ReadFile(file, start, end, tagId, result);
+                if (File.Exists(filePath))
+                {
+                    ReadFile(
+                        filePath,
+                        start,
+                        end,
+                        tagId,
+                        maxResults,
+                        results);
+                }
 
-                day = day.AddDays(1);
+                if (results.Count >= maxResults || day <= firstDay)
+                    break;
+
+                day = day.AddDays(-1);
             }
 
-            result.Sort(
-                delegate(UnifiedEvent a, UnifiedEvent b)
-                {
-                    return b.Timestamp.CompareTo(a.Timestamp);
-                }
-            );
+            results.Sort(delegate(UnifiedEvent a, UnifiedEvent b)
+            {
+                return b.Timestamp.CompareTo(a.Timestamp);
+            });
 
-            if (result.Count > maxResults)
-                result.RemoveRange(
+            if (results.Count > maxResults)
+                results.RemoveRange(
                     maxResults,
-                    result.Count - maxResults
-                );
+                    results.Count - maxResults);
 
-            return result;
+            return results;
         }
 
         private void ReadFile(
-            string file,
+            string filePath,
             DateTime start,
             DateTime end,
             string tagId,
-            List<UnifiedEvent> result)
+            int maxResults,
+            List<UnifiedEvent> results)
         {
             lock (syncRoot)
             {
-                using (StreamReader reader =
-                    new StreamReader(file))
+                using (StreamReader reader = new StreamReader(
+                    filePath,
+                    System.Text.Encoding.UTF8,
+                    true))
                 {
                     string line;
 
                     while ((line = reader.ReadLine()) != null)
                     {
-                        if (String.IsNullOrWhiteSpace(line))
+                        if (results.Count >= maxResults)
+                            break;
+
+                        if (String.IsNullOrEmpty(line))
                             continue;
+
+                        UnifiedEvent item;
 
                         try
                         {
-                            UnifiedEvent item =
-                                serializer.Deserialize<UnifiedEvent>(
-                                    line
-                                );
-
-                            if (item == null)
-                                continue;
-
-                            if (item.Timestamp < start ||
-                                item.Timestamp > end)
-                                continue;
-
-                            if (!String.IsNullOrEmpty(tagId) &&
-                                !String.Equals(
-                                    item.TagId,
-                                    tagId,
-                                    StringComparison.OrdinalIgnoreCase))
-                                continue;
-
-                            result.Add(item);
+                            item = serializer.Deserialize<UnifiedEvent>(line);
                         }
                         catch
                         {
-                            // Ignora somente o registro danificado.
+                            // Ignora somente o registro corrompido.
+                            continue;
                         }
+
+                        if (item == null)
+                            continue;
+
+                        if (item.Timestamp < start ||
+                            item.Timestamp > end)
+                            continue;
+
+                        if (!String.IsNullOrEmpty(tagId))
+                        {
+                            if (!String.Equals(
+                                item.TagId,
+                                tagId,
+                                StringComparison.OrdinalIgnoreCase))
+                                continue;
+                        }
+
+                        results.Add(item);
                     }
                 }
             }
@@ -199,15 +261,11 @@ namespace SupervisorioECA.Bridge.Storage
 
         private string GetDailyFile(DateTime date)
         {
-            return Path.Combine(
-                folder,
-                "events_" +
-                date.ToString(
-                    "yyyyMMdd",
-                    CultureInfo.InvariantCulture
-                ) +
-                ".jsonl"
-            );
+            string fileName = "events_" +
+                date.ToString("yyyyMMdd", CultureInfo.InvariantCulture) +
+                ".jsonl";
+
+            return Path.Combine(folder, fileName);
         }
     }
 }

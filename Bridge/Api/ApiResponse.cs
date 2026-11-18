@@ -108,21 +108,47 @@ namespace SupervisorioECA.Bridge.Api
         }
     }
 
+
     public class ApiAlarm
     {
-        public string Id { get; set; }
+        public long Id { get; set; }
+
         public string TagId { get; set; }
         public string TagName { get; set; }
         public string AlarmType { get; set; }
         public string State { get; set; }
+
         public double Value { get; set; }
         public double AlarmLimit { get; set; }
+
         public DateTime TriggeredAt { get; set; }
         public DateTime? AcknowledgedAt { get; set; }
         public DateTime? NormalizedAt { get; set; }
+
         public string AcknowledgedBy { get; set; }
         public string Description { get; set; }
+
+        public ApiAlarm()
+        {
+            Id = 0;
+
+            TagId = "";
+            TagName = "";
+            AlarmType = "";
+            State = "";
+
+            Value = 0;
+            AlarmLimit = 0;
+
+            TriggeredAt = DateTime.MinValue;
+            AcknowledgedAt = null;
+            NormalizedAt = null;
+
+            AcknowledgedBy = "";
+            Description = "";
+        }
     }
+
 
     public class ApiTrendPoint
     {

@@ -5,10 +5,11 @@ using SupervisorioECA.Bridge.Alarms;
 
 namespace SupervisorioECA.Bridge.Communication
 {
-    public class BridgeEventCoordinator
+    public sealed class BridgeEventCoordinator
     {
         private readonly EventHistoryService history;
         private readonly BridgeLogger logger;
+        private readonly object syncRoot = new object();
 
         public BridgeEventCoordinator(
             EventHistoryService history,
@@ -28,24 +29,16 @@ namespace SupervisorioECA.Bridge.Communication
 
             try
             {
-                history.AddAlarmEvent(alarmEvent);
-
-                if (logger != null)
+                lock (syncRoot)
                 {
-                    logger.Info(
-                        "Evento de alarme registrado: " +
-                        alarmEvent.EventType +
-                        " - " +
-                        alarmEvent.TagId
-                    );
+                    history.AddAlarmEvent(alarmEvent);
                 }
             }
             catch (Exception ex)
             {
-                LogFailure(
-                    "Falha ao registrar evento de alarme.",
-                    ex
-                );
+                LogError(
+                    "Falha ao registrar evento de alarme",
+                    ex);
             }
         }
 
@@ -57,37 +50,67 @@ namespace SupervisorioECA.Bridge.Communication
 
             try
             {
-                history.AddCommunicationEvent(
-                    communicationEvent
-                );
-
-                if (logger != null)
+                lock (syncRoot)
                 {
-                    logger.Info(
-                        "Evento de comunicacao registrado: " +
-                        communicationEvent.EventType
-                    );
+                    history.AddCommunicationEvent(
+                        communicationEvent);
                 }
             }
             catch (Exception ex)
             {
-                LogFailure(
-                    "Falha ao registrar evento de comunicacao.",
-                    ex
-                );
+                LogError(
+                    "Falha ao registrar evento de comunicacao",
+                    ex);
             }
         }
 
-        private void LogFailure(
+        public void RegisterSystemEvent(
+            string eventType,
+            string description,
+            string source,
+            bool isError)
+        {
+            try
+            {
+                UnifiedEvent item = new UnifiedEvent();
+
+                item.Id = Guid.NewGuid().ToString("N");
+                item.Timestamp = DateTime.Now;
+                item.EventType = eventType ?? "SYSTEM";
+                item.Description = description ?? "";
+                item.Source = source ?? "SUPERVISORIO";
+                item.IsError = isError;
+                item.Category = "SYSTEM";
+
+                lock (syncRoot)
+                {
+                    history.Add(item);
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError(
+                    "Falha ao registrar evento do sistema",
+                    ex);
+            }
+        }
+
+        private void LogError(
             string message,
-            Exception exception)
+            Exception ex)
         {
             if (logger == null)
                 return;
 
-            logger.Error(
-                message + " " + exception.Message
-            );
+            try
+            {
+                logger.Error(
+                    message + ": " + ex.Message);
+            }
+            catch
+            {
+                // Falha de log nao deve interromper a aquisicao.
+            }
         }
     }
 }

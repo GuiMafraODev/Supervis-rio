@@ -1,0 +1,142 @@
+
+/* =========================================
+   HISTORICO DE EVENTOS - SUPERVISORIO ECA
+   ========================================= */
+
+#eventList {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+}
+
+.event-item {
+    display: flex;
+    align-items: stretch;
+    gap: 12px;
+    padding: 12px 14px;
+    background: #ffffff;
+    border: 1px solid #dce4e9;
+    border-radius: 7px;
+    min-height: 66px;
+}
+
+.event-indicator {
+    width: 4px;
+    min-width: 4px;
+    border-radius: 4px;
+    background: #94a3b8;
+}
+
+.event-content {
+    flex: 1;
+    min-width: 0;
+}
+
+.event-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+    margin-bottom: 6px;
+}
+
+.event-type {
+    color: #475569;
+    font-size: 11px;
+    font-weight: bold;
+    letter-spacing: 0.5px;
+}
+
+.event-time {
+    color: #64748b;
+    font-size: 11px;
+    font-family: Arial, sans-serif;
+}
+
+.event-description {
+    color: #1e293b;
+    font-size: 13px;
+    line-height: 1.5;
+    overflow-wrap: break-word;
+}
+
+.event-source {
+    color: #64748b;
+    font-size: 11px;
+    margin-top: 5px;
+}
+
+.event-normal .event-indicator {
+    background: #0d9488;
+}
+
+.event-normal .event-type {
+    color: #0f766e;
+}
+
+.event-alarm {
+    background: #fffaf0;
+    border-color: #f3d8a5;
+}
+
+.event-alarm .event-indicator {
+    background: #d97706;
+}
+
+.event-alarm .event-type {
+    color: #b45309;
+}
+
+.event-warning {
+    background: #fffbeb;
+    border-color: #f5df9b;
+}
+
+.event-warning .event-indicator {
+    background: #eab308;
+}
+
+.event-warning .event-type {
+    color: #a16207;
+}
+
+.event-error {
+    background: #fff5f5;
+    border-color: #fecaca;
+}
+
+.event-error .event-indicator {
+    background: #dc2626;
+}
+
+.event-error .event-type {
+    color: #b91c1c;
+}
+
+.event-empty {
+    padding: 28px 16px;
+    text-align: center;
+    color: #64748b;
+    background: #ffffff;
+    border: 1px dashed #cbd5e1;
+    border-radius: 7px;
+    font-size: 13px;
+}
+
+@media screen and (max-width: 600px) {
+    .event-item {
+        padding: 10px;
+        gap: 9px;
+    }
+
+    .event-heading {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .event-description {
+        font-size: 12px;
+    }
+}

@@ -12,6 +12,7 @@ namespace SupervisorioECA.Bridge.Communication
         private readonly OpcAcquisitionService acquisition;
         private readonly TrendStore store;
         private readonly int intervalMs;
+        private readonly TimeSpan maximumSampleAge;
 
         private readonly object syncRoot = new object();
 
@@ -21,7 +22,6 @@ namespace SupervisorioECA.Bridge.Communication
         private bool disposed;
 
         public event EventHandler SamplesSaved;
-
         public event EventHandler StorageError;
 
         public TrendAcquisitionService(
@@ -41,6 +41,15 @@ namespace SupervisorioECA.Bridge.Communication
             this.acquisition = acquisition;
             this.store = store;
             this.intervalMs = intervalMs;
+
+            int freshnessLimit = Math.Max(
+                10000,
+                intervalMs * 2
+            );
+
+            maximumSampleAge = TimeSpan.FromMilliseconds(
+                freshnessLimit
+            );
         }
 
         public void Start()
@@ -48,9 +57,11 @@ namespace SupervisorioECA.Bridge.Communication
             lock (syncRoot)
             {
                 if (disposed)
+                {
                     throw new ObjectDisposedException(
                         "TrendAcquisitionService"
                     );
+                }
 
                 if (running)
                     return;
@@ -77,6 +88,12 @@ namespace SupervisorioECA.Bridge.Communication
                     timer.Dispose();
                     timer = null;
                 }
+
+                // Aguarda a gravacao em andamento.
+                // Os eventos sao disparados somente depois
+                // de liberar o estado acquiring.
+                while (acquiring)
+                    Monitor.Wait(syncRoot);
             }
         }
 
@@ -90,10 +107,17 @@ namespace SupervisorioECA.Bridge.Communication
                 acquiring = true;
             }
 
+            bool samplesWereSaved = false;
+            bool storageFailed = false;
+            string errorMessage = null;
+
             try
             {
                 IList<OpcValue> values =
                     acquisition.GetLatestValues();
+
+                if (values == null || values.Count == 0)
+                    return;
 
                 IList<TrendSample> samples =
                     new List<TrendSample>();
@@ -105,11 +129,13 @@ namespace SupervisorioECA.Bridge.Communication
                     if (value == null || !value.IsGood())
                         continue;
 
+                    if (!IsFresh(value, sampleTime))
+                        continue;
+
                     TrendSample sample =
                         TrendSample.FromOpcValue(value);
 
-                    // O horario representa o momento da
-                    // amostragem historica no supervisório.
+                    // Horario da amostragem historica.
                     sample.Timestamp = sampleTime;
 
                     samples.Add(sample);
@@ -118,44 +144,110 @@ namespace SupervisorioECA.Bridge.Communication
                 if (samples.Count > 0)
                 {
                     store.SaveBatch(samples);
-                    RaiseSamplesSaved();
+                    samplesWereSaved = true;
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine(
-                    "Falha ao gravar tendencias: " + ex.Message
-                );
-
-                RaiseStorageError();
+                storageFailed = true;
+                errorMessage = ex.Message;
             }
             finally
             {
                 lock (syncRoot)
                 {
                     acquiring = false;
+                    Monitor.PulseAll(syncRoot);
                 }
             }
+
+            // Notificacoes fora do estado acquiring.
+            // Isso evita deadlock se um assinante solicitar Stop().
+            if (storageFailed)
+            {
+                Console.WriteLine(
+                    DateTime.Now.ToString(
+                        "yyyy-MM-dd HH:mm:ss"
+                    ) +
+                    " - Falha ao gravar tendencias: " +
+                    errorMessage
+                );
+
+                RaiseStorageError();
+            }
+
+            if (samplesWereSaved)
+                RaiseSamplesSaved();
+        }
+
+        private bool IsFresh(
+            OpcValue value,
+            DateTime referenceTime)
+        {
+            if (value.Timestamp == DateTime.MinValue)
+                return false;
+
+            TimeSpan age = referenceTime - value.Timestamp;
+
+            // Rejeita leituras muito antigas e timestamps
+            // excessivamente adiantados em relacao ao relogio local.
+            if (age > maximumSampleAge)
+                return false;
+
+            if (age < TimeSpan.FromMinutes(-2))
+                return false;
+
+            return true;
         }
 
         private void RaiseSamplesSaved()
         {
             EventHandler handler = SamplesSaved;
 
-            if (handler != null)
+            if (handler == null)
+                return;
+
+            try
+            {
                 handler(this, EventArgs.Empty);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(
+                    "Erro no evento SamplesSaved: " +
+                    ex.Message
+                );
+            }
         }
 
         private void RaiseStorageError()
         {
             EventHandler handler = StorageError;
 
-            if (handler != null)
+            if (handler == null)
+                return;
+
+            try
+            {
                 handler(this, EventArgs.Empty);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(
+                    "Erro no evento StorageError: " +
+                    ex.Message
+                );
+            }
         }
 
         public void Dispose()
         {
+            lock (syncRoot)
+            {
+                if (disposed)
+                    return;
+            }
+
             Stop();
 
             lock (syncRoot)
